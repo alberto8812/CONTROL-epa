@@ -241,8 +241,12 @@ def _navigate_to_folder(page: Page, folder_path: str) -> None:
         # OneDrive personal
         target_url = f"{base_url}/?path=/{folder_path.lstrip('/')}"
 
-    page.goto(target_url, timeout=NAV_TIMEOUT_MS)
-    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.goto(target_url, timeout=NAV_TIMEOUT_MS, wait_until="load")
+    # Esperar a que aparezca la lista (más rápido que networkidle en SharePoint)
+    try:
+        page.wait_for_selector(SELECTORS["folder_row"], timeout=ACTION_TIMEOUT_MS, state="attached")
+    except PlaywrightTimeoutError:
+        pass  # Carpeta vacía es válido
 
     check_session_expired(page)
 
@@ -308,7 +312,11 @@ def _enter_folder(page: Page, folder_name: str) -> None:
     # Click en el nombre (heroField) navega dentro de la carpeta en SharePoint
     name_el = row.locator(SELECTORS["item_name"])
     name_el.click(timeout=ACTION_TIMEOUT_MS)
-    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_load_state("load", timeout=NAV_TIMEOUT_MS)
+    try:
+        page.wait_for_selector(SELECTORS["folder_row"], timeout=ACTION_TIMEOUT_MS, state="attached")
+    except PlaywrightTimeoutError:
+        pass
     check_session_expired(page)
 
 
@@ -317,8 +325,11 @@ def _go_back(page: Page, parent_path: str) -> None:
     """
     Vuelve a la carpeta padre usando el botón Back del browser.
     """
-    page.go_back(timeout=NAV_TIMEOUT_MS)
-    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.go_back(timeout=NAV_TIMEOUT_MS, wait_until="load")
+    try:
+        page.wait_for_selector(SELECTORS["folder_row"], timeout=ACTION_TIMEOUT_MS, state="attached")
+    except PlaywrightTimeoutError:
+        pass
     check_session_expired(page)
 
 
@@ -341,9 +352,8 @@ def _bulk_delete_files(page: Page, file_count: int) -> None:
     select_all_cell = page.locator(SELECTORS["select_all"])
     select_all_cell.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
     select_all_cell.click(timeout=ACTION_TIMEOUT_MS)
-    _time.sleep(0.8)  # Esperar que el toolbar actualice tras la selección
 
-    # 2. Toolbar Eliminar — directo o via overflow "..."
+    # 2. Toolbar Eliminar — esperar reactivamente que el toolbar actualice
     toolbar_delete = page.locator(SELECTORS["toolbar_delete"]).first
     try:
         toolbar_delete.wait_for(state="visible", timeout=3_000)
@@ -353,7 +363,6 @@ def _bulk_delete_files(page: Page, file_count: int) -> None:
         overflow = page.locator(SELECTORS["toolbar_overflow"]).first
         overflow.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
         overflow.click(timeout=ACTION_TIMEOUT_MS)
-        _time.sleep(0.3)
         toolbar_delete.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
         toolbar_delete.click(timeout=ACTION_TIMEOUT_MS)
 
@@ -365,7 +374,13 @@ def _bulk_delete_files(page: Page, file_count: int) -> None:
     except PlaywrightTimeoutError:
         pass  # Algunos tenants borran directo sin modal
 
-    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    # Esperar que las filas desaparezcan del DOM (más rápido que networkidle)
+    try:
+        page.wait_for_selector(
+            SELECTORS["folder_row"], timeout=10_000, state="detached"
+        )
+    except PlaywrightTimeoutError:
+        pass
 
 
 # ---------------------------------------------------------------------------
