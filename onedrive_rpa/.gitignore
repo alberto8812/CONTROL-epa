@@ -1,0 +1,34 @@
+# Sesión de Playwright — contiene tokens de autenticación. NUNCA commitear.
+session.json
+
+# Credenciales — NUNCA commitear.
+.env
+
+# Logs rotativos — generados en runtime.
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Debug artifacts
+debug_screenshot.png
+
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
