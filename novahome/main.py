@@ -42,10 +42,10 @@ def main() -> None:
             if choice == "azulito":
                 from novahome.modules.azulito import run
                 run()
-            elif choice == "novahld":
+            elif choice == "novahold":
                 from novahome.modules.novahld import run
                 run()
-            elif choice == "aditai":
+            elif choice == "aditia":
                 from novahome.modules.aditai import run
                 run()
             elif choice == "Instalaciones":
