@@ -18,7 +18,7 @@ _MODULES = ["azulito", "novahld", "aditai"]
 def _ascii_title() -> str:
     try:
         import pyfiglet
-        return pyfiglet.figlet_format("NOVAHOLD", font="slant")
+        return pyfiglet.figlet_format("NOVAHOLD", font="doom")
     except Exception:
         return "  N O V A H O L D\n"
 
@@ -41,7 +41,7 @@ def _short_path(p: Path, max_len: int = 46) -> str:
 
 def render_banner() -> None:
     art = _ascii_title()
-    _console.print(Text(art, style="bold magenta"), end="")
+    _console.print(Text(art, style="bold aquamarine1"), end="")
 
     branch = _git_branch()
 
