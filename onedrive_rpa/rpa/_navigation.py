@@ -124,7 +124,8 @@ def list_items(page: Page) -> list[ItemInfo]:
     for row in rows:
         try:
             name_el = row.locator(SELECTORS["item_name"])
-            name = name_el.inner_text(timeout=ACTION_TIMEOUT_MS).strip()
+            # Row is already attached — 2 s is more than enough to read text.
+            name = name_el.inner_text(timeout=2_000).strip()
             if not name:
                 continue
 
@@ -135,14 +136,14 @@ def list_items(page: Page) -> list[ItemInfo]:
             #   2. <i data-icon-name="FolderHorizontal" aria-label="Carpeta"> (Fluent UI)
             #   3. <svg ...> with title/aria-label (rare)
             #
-            # We try the img approach first (cheapest), then fall back to inner_html
-            # of the whole icon cell so we catch Fluent-UI icon names in the markup.
+            # Timeouts are tight (500 ms) because rows are already attached —
+            # these calls resolve in < 10 ms when the element is present.
             icon_src = ""
             icon_alt = ""
             try:
                 img_el = row.locator("[data-automationid='field-DocIcon'] img").first
-                icon_src = (img_el.get_attribute("src", timeout=2_000) or "").lower()
-                icon_alt = (img_el.get_attribute("alt", timeout=2_000) or "").lower()
+                icon_src = (img_el.get_attribute("src", timeout=500) or "").lower()
+                icon_alt = (img_el.get_attribute("alt", timeout=500) or "").lower()
             except Exception:
                 pass
 
@@ -154,7 +155,7 @@ def list_items(page: Page) -> list[ItemInfo]:
                 try:
                     container_html = (
                         row.locator("[data-automationid='field-DocIcon']")
-                        .first.inner_html(timeout=2_000)
+                        .first.inner_html(timeout=500)
                         .lower()
                     )
                     is_folder = (

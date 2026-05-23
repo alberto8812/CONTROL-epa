@@ -193,13 +193,11 @@ def collect_subfolders(page: "Page", source_folder: str) -> list[str]:  # type: 
     except FolderNotFoundError:
         raise ReportError(f"source_folder not found: {source_folder}")
 
-    # Espera a que SharePoint termine de renderizar la lista tras navegar
-    # desde una subcarpeta con operaciones masivas. networkidle es más
-    # confiable que un timeout fijo.
-    try:
-        page.wait_for_load_state("networkidle", timeout=15_000)
-    except Exception:
-        pass  # continuar aunque networkidle no se alcance
+    # navigate_to_folder already waits for folder_row to be attached.
+    # list_items repeats that wait internally — no additional delay needed.
+    # networkidle is intentionally avoided: SharePoint continuously fires
+    # background telemetry requests and never truly reaches idle, so waiting
+    # for it burns the full timeout (15 s) on every call.
     items = list_items(page)
     folders = [item.name for item in items if item.is_folder]
 
@@ -305,7 +303,11 @@ def upload_report(
             # never opened.  Now that the toolbar selector is fixed, the OS dialog
             # does open and expect_file_chooser can catch it.)
             _click_first_matching(page, SELECTORS["toolbar_upload"].split(", "), ACTION_TIMEOUT_MS)
-            page.wait_for_timeout(500)
+            # Wait for the dropdown menu to be visible instead of a fixed pause.
+            try:
+                page.wait_for_selector("[role='menu'], [role='listbox']", timeout=3_000, state="visible")
+            except Exception:
+                pass  # proceed anyway — the submenu click will fail and fallback handles it
 
             try:
                 with page.expect_file_chooser(timeout=15_000) as fc_info:
