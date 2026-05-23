@@ -9,8 +9,17 @@ from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-REPO_ROOT: Path = Path(__file__).resolve().parents[2]
-ENV_PATH: Path = REPO_ROOT / "onedrive_rpa" / ".env"
+
+def _resolve_data_dir() -> Path:
+    dev_path = Path(__file__).resolve().parents[2] / "onedrive_rpa"
+    if any((dev_path / f).exists() for f in (".env", "session.json", "folders.json")):
+        return dev_path
+    return Path.home() / ".novahold"
+
+
+REPO_ROOT: Path = Path(__file__).resolve().parents[2]  # backward-compat alias
+_DATA_DIR: Path = _resolve_data_dir()
+ENV_PATH: Path = _DATA_DIR / ".env"
 _OS: str = platform.system()  # "Darwin", "Linux", "Windows"
 
 REQUIRED_KEYS: list[str] = [
@@ -176,7 +185,7 @@ def install_deps(results: list) -> None:
         ok = True
         for cmd in cmds:
             console.print(Text(f"  $ {' '.join(cmd)}", style="dim"))
-            rc = subprocess.run(cmd, cwd=REPO_ROOT).returncode
+            rc = subprocess.run(cmd).returncode
             if rc != 0:
                 console.print(Text(f"  ✗  Error al instalar {name} (código {rc})", style="bold red"))
                 ok = False

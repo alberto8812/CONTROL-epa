@@ -13,7 +13,6 @@ import sys
 
 from novahome.modules._deps import (
     ENV_PATH,
-    REPO_ROOT,
     REQUIRED_KEYS,
     build_install_plan,
     install_deps,
@@ -73,10 +72,10 @@ def configure_env() -> None:
 
 
 def launch_rpa(relogin: bool = False) -> int:
-    cmd = [sys.executable, "onedrive_rpa/main.py", "--mode", "manual"]
+    cmd = [sys.executable, "-m", "onedrive_rpa.main", "--mode", "manual"]
     if relogin:
         cmd.append("--relogin")
-    result = subprocess.run(cmd, cwd=REPO_ROOT)
+    result = subprocess.run(cmd)
     return result.returncode
 
 

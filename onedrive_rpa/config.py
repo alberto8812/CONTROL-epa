@@ -10,7 +10,25 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+
+def _resolve_data_dir() -> Path:
+    """
+    Development: data files live alongside config.py (onedrive_rpa/).
+    Installed (pipx/pip): data files live in ~/.novahold/.
+    Detection: if .env or session.json or folders.json exist next to config.py → dev mode.
+    """
+    dev_dir = Path(__file__).parent
+    if any((dev_dir / f).exists() for f in (".env", "session.json", "folders.json")):
+        return dev_dir
+    data_dir = Path.home() / ".novahold"
+    data_dir.mkdir(exist_ok=True)
+    return data_dir
+
+
+BASE_DIR: Path = _resolve_data_dir()
+_BASE_DIR = BASE_DIR  # backward-compat alias
+
+load_dotenv(BASE_DIR / ".env")
 
 # ---------------------------------------------------------------------------
 # URLs
@@ -26,15 +44,13 @@ ONEDRIVE_LOGIN_URL: str = "https://archacomco-my.sharepoint.com"
 # Paths
 # ---------------------------------------------------------------------------
 
-_BASE_DIR: Path = Path(__file__).parent
-
-SESSION_PATH: Path = _BASE_DIR / "session.json"
+SESSION_PATH: Path = BASE_DIR / "session.json"
 """Ruta del archivo de storage_state de Playwright. Nunca commitear."""
 
-FOLDERS_PATH: Path = _BASE_DIR / "folders.json"
+FOLDERS_PATH: Path = BASE_DIR / "folders.json"
 """Ruta del archivo con las carpetas a limpiar."""
 
-LOG_DIR: Path = _BASE_DIR / "logs"
+LOG_DIR: Path = BASE_DIR / "logs"
 """Directorio donde se escriben los logs rotativos."""
 
 # ---------------------------------------------------------------------------

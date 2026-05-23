@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "novahold"
+version = "1.0.0"
+description = "NovaHold Hub — OneDrive RPA automation suite"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright==1.44.0",
+    "click==8.1.7",
+    "loguru==0.7.2",
+    "python-dotenv==1.0.1",
+    "rich==13.7.1",
+    "openpyxl==3.1.2",
+    "pyfiglet>=1.0",
+    "questionary>=2.0,<3.0",
+]
+
+[project.scripts]
+nova = "novahome.main:main"
+
+[tool.setuptools.packages.find]
+include = ["novahome*", "onedrive_rpa*"]
+
+[tool.setuptools.package-data]
+"onedrive_rpa" = ["env.example", "folders.json"]

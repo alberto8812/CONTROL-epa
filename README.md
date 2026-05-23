@@ -8,10 +8,14 @@ Hub de automatización interna con interfaz de terminal (TUI). Centraliza herram
 
 ```
 CONTROL-epa/
-├── nova                        ← launcher ejecutable (./nova)
-├── requirements.txt            ← dependencias del hub
+├── nova                        ← launcher ejecutable (./nova) — para desarrollo
+├── install.sh                  ← instalador macOS/Linux (un solo comando)
+├── install.bat                 ← instalador Windows (doble click)
+├── pyproject.toml              ← definición del paquete (pipx/pip)
+├── requirements.txt            ← dependencias del hub (desarrollo)
 ├── novahome/                   ← hub NovaHold
 │   ├── main.py                 ← entrada principal, menú home
+│   ├── __main__.py             ← permite `python -m novahome`
 │   ├── modules/
 │   │   ├── azulito.py          ← OneDrive RPA launcher
 │   │   ├── novahld.py          ← placeholder (próximamente)
@@ -31,7 +35,7 @@ CONTROL-epa/
     ├── rpa/_retry.py           ← decorador @with_retry con backoff
     ├── tests/                  ← tests unitarios del RPA
     ├── folders.json            ← carpetas a limpiar + config del reporte
-    └── .env                    ← credenciales (no commitear)
+    └── .env                    ← credenciales (no commitear, solo en desarrollo)
 ```
 
 ---
