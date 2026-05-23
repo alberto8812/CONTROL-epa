@@ -42,29 +42,57 @@ CONTROL-epa/
 
 ## Instalación
 
+### Opción A — Instalador automático (recomendado)
+
+**macOS / Linux:**
 ```bash
-# 1. Clonar el repositorio
 git clone https://github.com/alberto8812/CONTROL-epa.git
 cd CONTROL-epa
-
-# 2. Instalar dependencias
-pip install -r requirements.txt
-
-# 3. Instalar browser de Playwright
-playwright install chromium
+./install.sh
 ```
+
+**Windows:**
+```
+1. Clonar o descomprimir el repositorio
+2. Doble click en install.bat
+3. Abrir una terminal nueva
+```
+
+El instalador verifica Python 3.11+, instala pipx si falta, e instala `novahold` como comando global.
+
+### Opción B — pipx (usuario técnico)
+
+```bash
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+pipx install .
+```
+
+### Opción C — desarrollo local
+
+```bash
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+pip install -r requirements.txt
+```
+
+### Primer uso
+
+Después de instalar, ejecutá `nova`. La primera vez que entrés a **azulito**, el hub:
+1. Verifica automáticamente si Playwright y Chromium están instalados — y ofrece instalarlos si falta algo.
+2. Ofrece configurar las credenciales de OneDrive (`.env`) mediante un wizard interactivo.
+
+No es necesario correr comandos adicionales.
 
 ---
 
 ## Ejecutar
 
 ```bash
-./nova
+nova
 ```
 
-Eso es todo. El launcher `nova` en la raíz del repo inicializa el path y lanza el hub.
-
-> **Alternativa** si preferís explícito: `python3 novahome/main.py`
+> **En desarrollo (sin instalar):** `./nova` desde la raíz del repositorio.
 
 ---
 
@@ -196,24 +224,21 @@ El exit code del RPA se propaga al hub:
 El hub **nunca importa** código de `onedrive_rpa/`. La invocación es siempre como subprocess:
 
 ```python
-subprocess.run([sys.executable, "onedrive_rpa/main.py", "--mode", "manual"], cwd=REPO_ROOT)
+subprocess.run([sys.executable, "-m", "onedrive_rpa.main", "--mode", "manual"])
 ```
 
-Esto preserva la separación en capas del RPA y permite actualizar cada componente de forma independiente.
+Esto preserva la separación en capas del RPA y permite actualizar cada componente de forma independiente. Usar `-m` (invocación de módulo) garantiza que funciona tanto en desarrollo como instalado vía pipx.
 
-### Path del .env
+### Directorio de datos
 
-`onedrive_rpa/config.py` resuelve el `.env` como `Path(__file__).parent / ".env"`, lo que fija la ruta en `onedrive_rpa/.env`. El wizard siempre escribe ahí — cambiar esta ruta requeriría modificar `config.py`.
+`onedrive_rpa/config.py` resuelve el directorio de datos de forma inteligente:
 
-### REPO_ROOT
+| Modo | Directorio | Condición |
+|------|-----------|-----------|
+| Desarrollo | `onedrive_rpa/` | `.env`, `session.json` o `folders.json` existen junto a `config.py` |
+| Instalado | `~/.novahold/` | Ninguno de los archivos anteriores está presente |
 
-Cada módulo del hub resuelve la raíz del repo en tiempo de import:
-
-```python
-REPO_ROOT = Path(__file__).resolve().parents[N]
-```
-
-Esto garantiza que `./nova` funcione desde cualquier directorio de trabajo.
+Esto permite que `pipx install .` y `./nova` (desarrollo) coexistan sin conflictos. El wizard de credenciales siempre escribe en el directorio correcto según el modo detectado.
 
 ---
 
@@ -248,7 +273,9 @@ Omitir o poner `"report": null` deshabilita la generación del reporte. El forma
 
 ## Variables de entorno requeridas (azulito)
 
-Copiá `onedrive_rpa/env.example` a `onedrive_rpa/.env` y completá:
+**Instalado (`pipx install .`):** el wizard las guarda automáticamente en `~/.novahold/.env`.
+
+**Desarrollo (repo clonado):** copiá `onedrive_rpa/env.example` a `onedrive_rpa/.env` y completá:
 
 ```env
 ONEDRIVE_USERNAME=tu_usuario@empresa.com
@@ -256,7 +283,7 @@ ONEDRIVE_PASSWORD=tu_contraseña
 SHAREPOINT_PERSONAL_PATH=/personal/tu_usuario_empresa_com
 ```
 
-O usá el wizard desde el hub: `azulito → Eliminar archivos OneDrive → Configurar variables de entorno`.
+En ambos casos podés usar el wizard desde el hub: `nova → azulito → Configurar variables de entorno`.
 
 ---
 
