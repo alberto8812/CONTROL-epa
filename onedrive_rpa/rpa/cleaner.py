@@ -13,25 +13,29 @@ Borrado NO se reintenta (ADR-7). Navegación y listing SÍ (via with_retry).
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
-from typing import NamedTuple
 
 from loguru import logger
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
-import time as _time
-
 from onedrive_rpa.config import (
-    ONEDRIVE_URL,
-    SHAREPOINT_PERSONAL_PATH,
     SELECTORS,
-    NAV_TIMEOUT_MS,
     ACTION_TIMEOUT_MS,
+    NAV_TIMEOUT_MS,
 )
 from onedrive_rpa.auth.session import check_session_expired, SessionExpiredError
 from onedrive_rpa.rpa._retry import with_retry
 from onedrive_rpa.rpa.ui import RPACallbacks
+from onedrive_rpa.rpa._navigation import (
+    ItemInfo,
+    navigate_to_folder,
+    list_items,
+    FolderNotFoundError,
+)
+
+# Re-export FolderNotFoundError for backward compatibility with existing imports
+# (e.g. main.py: from onedrive_rpa.rpa.cleaner import FolderNotFoundError)
+FolderNotFoundError = FolderNotFoundError  # noqa: F811
 
 
 # ---------------------------------------------------------------------------
@@ -61,20 +65,6 @@ class CleanStats:
         self.would_delete.extend(other.would_delete)
         self.skipped.extend(other.skipped)
         self.errors.extend(other.errors)
-
-
-class _ItemInfo(NamedTuple):
-    name: str
-    is_folder: bool
-
-
-# ---------------------------------------------------------------------------
-# Excepciones
-# ---------------------------------------------------------------------------
-
-
-class FolderNotFoundError(Exception):
-    """La carpeta configurada no existe en OneDrive."""
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +117,7 @@ class FolderCleaner:
         self._cb.on_folder_start(folder_path)
 
         try:
-            _navigate_to_folder(self._page, folder_path)
+            navigate_to_folder(self._page, folder_path)
         except FolderNotFoundError:
             logger.warning("SKIP | folder={folder} reason=not_found", folder=folder_path)
             raise
@@ -145,9 +135,9 @@ class FolderCleaner:
         """
         check_session_expired(self._page)
 
-        items = _list_items(self._page)
+        items = list_items(self._page)
 
-        # Separar carpetas y archivos para procesar carpetas primero (DFS)
+        # Separate folders and files — process folders first (DFS)
         folders = [i for i in items if i.is_folder]
         files = [i for i in items if not i.is_folder]
 
@@ -176,7 +166,7 @@ class FolderCleaner:
 
         # Luego: borrar archivos del nivel actual con select-all + toolbar delete
         check_session_expired(self._page)
-        current_items = _list_items(self._page)
+        current_items = list_items(self._page)
         current_files = [i for i in current_items if not i.is_folder]
 
         if not current_files:
@@ -211,90 +201,8 @@ class FolderCleaner:
 
 
 # ---------------------------------------------------------------------------
-# Funciones de navegación (idempotentes → elegibles para with_retry)
+# Private navigation helpers (folder traversal within a clean run)
 # ---------------------------------------------------------------------------
-
-
-@with_retry()
-def _navigate_to_folder(page: Page, folder_path: str) -> None:
-    """
-    Navega a la carpeta indicada desde la raíz de OneDrive.
-
-    Construye la URL de OneDrive con el path relativo. Si la página redirige
-    a login o no encuentra la carpeta (title "Page not found"), levanta
-    FolderNotFoundError.
-
-    Raises:
-        FolderNotFoundError: Si la carpeta no existe.
-        SessionExpiredError: Si se detecta redirect a login.
-    """
-    # Construir URL: OneDrive for Business usa path en la URL
-    # Ejemplo: https://tenant-my.sharepoint.com/personal/user/.../Documentos/Reportes
-    # Como ONEDRIVE_URL puede ser la raíz, navegamos por click en breadcrumb/URL
-    # Para simplicidad: navegar a la raíz y luego hacer click en la ruta
-    base_url = ONEDRIVE_URL.rstrip("/")
-    if SHAREPOINT_PERSONAL_PATH:
-        # OneDrive for Business: navegar directo a la biblioteca de documentos
-        personal = SHAREPOINT_PERSONAL_PATH.rstrip("/")
-        target_url = f"{base_url}{personal}/Documents/{folder_path.lstrip('/')}"
-    else:
-        # OneDrive personal
-        target_url = f"{base_url}/?path=/{folder_path.lstrip('/')}"
-
-    page.goto(target_url, timeout=NAV_TIMEOUT_MS, wait_until="load")
-    # Esperar a que aparezca la lista (más rápido que networkidle en SharePoint)
-    try:
-        page.wait_for_selector(SELECTORS["folder_row"], timeout=ACTION_TIMEOUT_MS, state="attached")
-    except PlaywrightTimeoutError:
-        pass  # Carpeta vacía es válido
-
-    check_session_expired(page)
-
-    # Detectar "Page not found" o equivalente
-    if "Page not found" in page.title() or "not found" in page.url.lower():
-        raise FolderNotFoundError(f"Carpeta no encontrada: {folder_path}")
-
-
-@with_retry()
-def _list_items(page: Page) -> list[_ItemInfo]:
-    """
-    Devuelve la lista de items visibles en la carpeta actual.
-
-    Distingue carpetas de archivos usando el selector item_type:
-    si el texto contiene "folder" (case-insensitive) → es carpeta.
-    """
-    # Esperar a que haya al menos un row o que la lista esté vacía
-    try:
-        page.wait_for_selector(
-            SELECTORS["folder_row"],
-            timeout=ACTION_TIMEOUT_MS,
-            state="attached",
-        )
-    except PlaywrightTimeoutError:
-        # Lista vacía es válido
-        return []
-
-    rows: list[Locator] = page.locator(SELECTORS["folder_row"]).all()
-    items: list[_ItemInfo] = []
-
-    for row in rows:
-        try:
-            name_el = row.locator(SELECTORS["item_name"])
-            name = name_el.inner_text(timeout=ACTION_TIMEOUT_MS).strip()
-            if not name:
-                continue
-
-            # Detectar carpeta por el src del ícono (más estable que aria-label o itemtype)
-            icon_el = row.locator(SELECTORS["item_type_icon"])
-            icon_src = (icon_el.get_attribute("src", timeout=ACTION_TIMEOUT_MS) or "").lower()
-            is_folder = "folder" in icon_src
-
-            items.append(_ItemInfo(name=name, is_folder=is_folder))
-        except Exception:
-            # Row stale o sin nombre → ignorar
-            continue
-
-    return items
 
 
 @with_retry()

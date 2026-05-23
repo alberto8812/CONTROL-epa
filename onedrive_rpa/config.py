@@ -50,6 +50,31 @@ ACTION_TIMEOUT_MS: int = 10_000
 LOGIN_TIMEOUT_MS: int = 300_000
 """Timeout de espera para login manual (5 minutos)."""
 
+UPLOAD_TIMEOUT_MS: int = 60_000
+"""Timeout para la operación de carga de archivo (upload) al toolbar de OneDrive."""
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+REPORT_PASSWORD_LENGTH: int = 24
+"""Longitud de la contraseña generada para el reporte XLSX."""
+
+REPORT_PASSWORD_ALPHABET: str = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    "!@#$%^&*()-_=+[]{}|;:,.<>?"
+)
+"""Alfabeto permitido para generar contraseñas de reporte.
+Excluye explícitamente las comillas \" y ' para compatibilidad con hojas de cálculo."""
+
+REPORT_FILENAME_PREFIX: str = "reporte"
+"""Prefijo del nombre de archivo del reporte XLSX (sin guión bajo final)."""
+
+REPORT_FILENAME_TIMESTAMP_FORMAT: str = "%Y%m%d_%H%M%S"
+"""Formato strftime para el timestamp en el nombre del archivo de reporte."""
+
 # ---------------------------------------------------------------------------
 # Retry
 # ---------------------------------------------------------------------------
@@ -138,4 +163,35 @@ SELECTORS: dict[str, str] = {
     # Botón de confirmación en el modal "¿Desea eliminar?".
     # data-automationid es todo minúscula: 'confirmbutton' (no 'confirmButton').
     "confirm_delete_button": "button[data-automationid='confirmbutton']",
+
+    # Botón "Cargar" / "Upload" / "Crear o cargar" en la barra de comandos.
+    # En SharePoint en español el botón se llama "Crear o cargar".
+    "toolbar_upload": (
+        "[data-automationid='uploadCommand'], "
+        "[data-automationid='newCommand'], "
+        "button[title='Crear o cargar'], "
+        "button[aria-label='Crear o cargar'], "
+        "button[name='Cargar'], button[name='Upload'], "
+        "button[aria-label='Cargar'], button[aria-label='Upload']"
+    ),
+
+    # Item de menú "Cargar archivos" / "Carga de archivos" / "Upload files" dentro del dropdown.
+    # SharePoint en español puede usar "Carga de archivos" O "Cargar archivos" según la versión del tenant.
+    "upload_files_menuitem": (
+        "[data-automationid='uploadFilesCommand'], "
+        "[data-automationid='uploadFileCommand'], "
+        "[role='menuitem'][title='Carga de archivos'], "
+        "[role='menuitem'][title='Cargar archivos'], "
+        "[role='menuitem'][title='Upload files'], "
+        "[role='menuitem']:has-text('Carga de archivos'), "
+        "[role='menuitem']:has-text('Cargar archivos'), "
+        "[role='menuitem']:has-text('Upload files'), "
+        "[role='menuitem'][name='Archivos'], "
+        "[role='menuitem'][name='Files'], "
+        "button:has-text('Carga de archivos'), "
+        "li:has-text('Carga de archivos')"
+    ),
+
+    # Input de tipo file que SharePoint inyecta al hacer clic en "Archivos".
+    "upload_file_input": "input[type='file']",
 }

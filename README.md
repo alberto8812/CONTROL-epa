@@ -24,10 +24,13 @@ CONTROL-epa/
     ├── config.py               ← constantes, selectores, vars de entorno
     ├── auth/session.py         ← autenticación Playwright (storage_state)
     ├── rpa/cleaner.py          ← lógica DFS de eliminación
+    ├── rpa/_navigation.py      ← helpers de navegación OneDrive
+    ├── rpa/reporter.py         ← pipeline del reporte Excel
     ├── rpa/ui.py               ← TUI Rich (Observer pattern)
     ├── rpa/logger.py           ← Loguru + audit log rotativo
     ├── rpa/_retry.py           ← decorador @with_retry con backoff
-    ├── folders.json            ← carpetas a limpiar
+    ├── tests/                  ← tests unitarios del RPA
+    ├── folders.json            ← carpetas a limpiar + config del reporte
     └── .env                    ← credenciales (no commitear)
 ```
 
@@ -82,7 +85,7 @@ Eso es todo. El launcher `nova` en la raíz del repo inicializa el path y lanza 
 └─────────────────────────────────────────────────────────┘
 ```
 
-- **azulito** → accede al módulo de eliminación OneDrive
+- **azulito** → accede al módulo de eliminación OneDrive (y generación de reporte)
 - **novahld** → próximamente (muestra panel informativo y vuelve)
 - **aditai** → próximamente (muestra panel informativo y vuelve)
 - **Salir** → cierra el hub (también funciona con `Ctrl+C`)
@@ -168,6 +171,7 @@ El proceso RPA:
 3. Navega recursivamente por las carpetas configuradas en `folders.json`
 4. Elimina todos los archivos (mantiene la estructura de carpetas)
 5. Muestra progreso en tiempo real con Rich TUI
+6. Genera y sube reporte Excel a OneDrive (si `report` está configurado en `folders.json`)
 
 El exit code del RPA se propaga al hub:
 
@@ -218,6 +222,26 @@ Esto garantiza que `./nova` funcione desde cualquier directorio de trabajo.
 
 ---
 
+## Configuración de `folders.json` (azulito)
+
+`onedrive_rpa/folders.json` define qué carpetas limpiar y, opcionalmente, desde dónde generar el reporte:
+
+```json
+{
+  "clean": [
+    { "path": "Documentos/Reportes/Viejos" }
+  ],
+  "report": {
+    "source_folder": "Documents/registros",
+    "destination_folder": "Documents/reportes"
+  }
+}
+```
+
+Omitir o poner `"report": null` deshabilita la generación del reporte. El formato legacy (array directo) sigue siendo compatible.
+
+---
+
 ## Variables de entorno requeridas (azulito)
 
 Copiá `onedrive_rpa/env.example` a `onedrive_rpa/.env` y completá:
@@ -243,3 +267,4 @@ O usá el wizard desde el hub: `azulito → Eliminar archivos OneDrive → Confi
 | click | 8.1.7 | CLI del RPA |
 | loguru | 0.7.2 | Logging con rotación |
 | python-dotenv | 1.0.1 | Lectura del `.env` |
+| openpyxl | 3.1.2 | Generación de reportes Excel |

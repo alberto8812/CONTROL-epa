@@ -72,11 +72,11 @@ def configure_env() -> None:
 # ── RPA launcher ──────────────────────────────────────────────────────────────
 
 
-def launch_rpa() -> int:
-    result = subprocess.run(
-        [sys.executable, "onedrive_rpa/main.py", "--mode", "manual"],
-        cwd=REPO_ROOT,
-    )
+def launch_rpa(relogin: bool = False) -> int:
+    cmd = [sys.executable, "onedrive_rpa/main.py", "--mode", "manual"]
+    if relogin:
+        cmd.append("--relogin")
+    result = subprocess.run(cmd, cwd=REPO_ROOT)
     return result.returncode
 
 
@@ -85,7 +85,11 @@ def launch_rpa() -> int:
 
 def _eliminar_flow() -> None:
     import questionary
+    from rich.console import Console
+    from rich.text import Text
     from novahome.ui.checks import render_checks
+
+    console = Console()
 
     while True:
         results = run_all_checks()
@@ -95,12 +99,24 @@ def _eliminar_flow() -> None:
         if all_passed:
             action = questionary.select(
                 "¿Qué querés hacer?",
-                choices=["Iniciar", "Configurar variables de entorno", "Volver"],
+                choices=["Iniciar", "Renovar sesión", "Configurar variables de entorno", "Volver"],
             ).ask()
             if action is None or action == "Volver":
                 return
             elif action == "Iniciar":
-                sys.exit(launch_rpa())
+                code = launch_rpa()
+                if code == 3:
+                    console.print(Text(
+                        "\n⚠  Sesión expirada. Vas a tener que loguearte de nuevo.",
+                        style="bold yellow3",
+                    ))
+                    renew = questionary.confirm("¿Renovar sesión ahora?", default=True).ask()
+                    if renew:
+                        sys.exit(launch_rpa(relogin=True))
+                else:
+                    sys.exit(code)
+            elif action == "Renovar sesión":
+                sys.exit(launch_rpa(relogin=True))
             elif action == "Configurar variables de entorno":
                 configure_env()
         else:

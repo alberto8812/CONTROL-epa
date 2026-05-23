@@ -1,8 +1,14 @@
-[
-  {
-    "path": "pruebas/archivos_1"
-  },
-  {
-    "path": "pruebas/archivos_2"
+{
+  "clean": [
+    {
+      "path": "pruebas/archivos_1"
+    },
+    {
+      "path": "pruebas/archivos_2"
+    }
+  ],
+  "report": {
+    "source_folder": "pruebas",
+    "destination_folder": "pruebas/registro"
   }
-]
+}

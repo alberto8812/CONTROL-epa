@@ -65,6 +65,8 @@ _EVENTS: dict[str, tuple[str, str]] = {
     "ERROR":  ("✗", _C_ERROR),
     "WARN":   ("▲", _C_WARN),
     "INFO":   ("·", _C_DIM),
+    "REPORT": ("▣", "bold cyan"),
+    "UPLOAD": ("↑", "bold blue"),
 }
 
 
@@ -78,6 +80,12 @@ class RPACallbacks:
     on_file_would_delete: Callable[[str], None]           = field(default=lambda *_: None)
     on_error:             Callable[[str, str], None]      = field(default=lambda *_: None)
     on_tick:              Callable[[], None]              = field(default=lambda: None)
+    # Report callbacks (PR 3)
+    on_report_start:      Callable[[str, str], None]      = field(default=lambda *_: None)
+    on_report_subfolders: Callable[[int], None]           = field(default=lambda *_: None)
+    on_report_uploaded:   Callable[[str], None]           = field(default=lambda *_: None)
+    on_report_skipped:    Callable[[str], None]           = field(default=lambda *_: None)
+    on_report_error:      Callable[[str], None]           = field(default=lambda *_: None)
 
 
 # ── RPADisplay ────────────────────────────────────────────────────────────────
@@ -146,6 +154,11 @@ class RPADisplay:
             on_file_would_delete=self._on_file_would_delete,
             on_error=self._on_error,
             on_tick=self._refresh,
+            on_report_start=self._on_report_start,
+            on_report_subfolders=self._on_report_subfolders,
+            on_report_uploaded=self._on_report_uploaded,
+            on_report_skipped=self._on_report_skipped,
+            on_report_error=self._on_report_error,
         )
 
     # ── Emisión de eventos ────────────────────────────────────────────────────
@@ -193,6 +206,21 @@ class RPADisplay:
     def _on_error(self, path: str, reason: str) -> None:
         self._errors += 1
         self._emit("ERROR", f"{path}  ·  {reason[:60]}")
+
+    def _on_report_start(self, source: str, destination: str) -> None:
+        self._emit("REPORT", f"Generating report  ·  source={source}  →  dest={destination}")
+
+    def _on_report_subfolders(self, count: int) -> None:
+        self._emit("REPORT", f"{count} subfolder(s) found")
+
+    def _on_report_uploaded(self, filename: str) -> None:
+        self._emit("UPLOAD", f"Report uploaded: {filename}")
+
+    def _on_report_skipped(self, reason: str) -> None:
+        self._emit("REPORT", f"Report skipped  ·  {reason}")
+
+    def _on_report_error(self, msg: str) -> None:
+        self._emit("ERROR", f"Report error  ·  {msg[:80]}")
 
     def _refresh(self) -> None:
         if not (self._live and self._layout):

@@ -1,0 +1,20 @@
+change: onedrive-folder-report
+status: archived
+archived_at: "2026-05-23"
+tasks_total: 15
+tasks_complete: 15
+prs: 3
+verification_verdict: "PASS WITH WARNINGS"
+critical_issues: 0
+warnings: 5
+tests_passed: 15
+spec_coverage: "34/34 (100%)"
+artifact_store: "hybrid"
+engram_ids:
+  proposal: 227
+  spec: 228
+  design: 229
+  tasks: 230
+  apply_progress: 231
+  verify_report: 232
+  archive_report: 233

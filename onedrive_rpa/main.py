@@ -28,6 +28,7 @@ Exit codes:
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # Permite correr como script directo: python main.py o python onedrive_rpa/main.py
@@ -46,6 +47,37 @@ from onedrive_rpa.auth.session import (
 from onedrive_rpa.rpa.cleaner import FolderCleaner, CleanStats, FolderNotFoundError
 from onedrive_rpa.rpa.logger import configure_logging
 from onedrive_rpa.rpa.ui import RPADisplay
+
+
+# ---------------------------------------------------------------------------
+# Config types
+# ---------------------------------------------------------------------------
+
+
+class ConfigError(Exception):
+    """Raised when folders.json contains an invalid configuration."""
+
+
+@dataclass(frozen=True)
+class ReportConfig:
+    """Configuration for the optional post-clean report step."""
+
+    source_folder: str
+    """OneDrive folder whose immediate sub-folders will be enumerated."""
+
+    destination_folder: str
+    """OneDrive folder where the generated Excel report will be uploaded."""
+
+
+@dataclass(frozen=True)
+class FoldersConfig:
+    """Parsed and validated contents of folders.json."""
+
+    clean: list[str]
+    """Ordered list of folder paths to clean (relative, no leading slash)."""
+
+    report: ReportConfig | None
+    """Optional report configuration. None when the key is absent or null."""
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +147,18 @@ def main(
     # -----------------------------------------------------------------------
     # 1. Cargar y validar folders.json
     # -----------------------------------------------------------------------
-    folders = _load_folders(config_path)
-    if not folders:
+    try:
+        folders_config = _load_folders(config_path)
+    except ConfigError as exc:
+        logger.error("CONFIG | {err}", err=str(exc))
+        click.echo(f"Config error: {exc}", err=True)
+        sys.exit(1)
+
+    folder_paths = folders_config.clean
+    if not folder_paths:
         logger.error("CONFIG | folders.json está vacío o sin entradas válidas")
         sys.exit(1)
 
-    folder_paths = [f["path"] for f in folders]
     logger.info(
         "CONFIG | folders={n} | paths={paths}",
         n=len(folder_paths),
@@ -186,6 +224,29 @@ def main(
                     )
                     global_stats.errors.append(folder_path)
 
+            # -----------------------------------------------------------------
+            # 5. Post-clean report (if configured and not dry-run)
+            # -----------------------------------------------------------------
+            if folders_config.report is not None and not dry_run:
+                from onedrive_rpa.rpa.reporter import run_report
+                logger.info(
+                    "REPORT_BEGIN | source={s} | destination={d}",
+                    s=folders_config.report.source_folder,
+                    d=folders_config.report.destination_folder,
+                )
+                run_report(
+                    page,
+                    folders_config.report.source_folder,
+                    folders_config.report.destination_folder,
+                    callbacks=display.callbacks,
+                )
+            elif folders_config.report is not None and dry_run:
+                logger.info("REPORT | SKIPPED | reason=dry_run")
+                if hasattr(display.callbacks, "on_report_skipped"):
+                    display.callbacks.on_report_skipped("dry_run")
+            else:
+                logger.debug("REPORT | SKIPPED | reason=not_configured")
+
             if browser:
                 browser.close()
 
@@ -205,21 +266,24 @@ def main(
 # ---------------------------------------------------------------------------
 
 
-def _load_folders(config_path: str) -> list[dict]:
+def _load_folders(config_path: str) -> FoldersConfig:
     """
-    Carga y valida folders.json.
+    Load and validate folders.json, returning a FoldersConfig.
 
-    Validaciones:
-        - Archivo existe.
-        - JSON válido.
-        - Es una lista de objetos con clave "path".
-        - Cada path: no vacío, no absoluto, no contiene "..".
+    Supports two schemas:
+        - Legacy: a JSON array of {"path": "..."} objects → report=None
+        - Modern: a JSON object with "clean" (array) and optional "report" keys
+
+    Path validation (legacy + modern clean entries):
+        - Each entry must have a non-empty "path" key
+        - Paths must be relative (not absolute, no ".." components)
 
     Returns:
-        Lista de dicts validados.
+        FoldersConfig with validated clean paths and an optional ReportConfig.
 
     Raises:
-        SystemExit(1): ante cualquier error de validación.
+        ConfigError: for any invalid configuration (invalid JSON, missing keys, etc.)
+        SystemExit(1): if the config file is not found.
     """
     path = Path(config_path)
 
@@ -233,39 +297,74 @@ def _load_folders(config_path: str) -> list[dict]:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         logger.error("CONFIG | JSON inválido en {path}: {err}", path=config_path, err=exc)
-        sys.exit(1)
+        raise ConfigError(f"Invalid JSON in {config_path}: {exc}") from exc
 
-    if not isinstance(data, list):
-        logger.error("CONFIG | folders.json debe ser una lista de objetos")
-        sys.exit(1)
+    # ------------------------------------------------------------------
+    # Legacy array format
+    # ------------------------------------------------------------------
+    if isinstance(data, list):
+        logger.info(
+            "CONFIG | LEGACY SCHEMA | report disabled"
+            " — migrate folders.json to object schema to enable reports"
+        )
+        clean_paths = _validate_clean_entries(data)
+        return FoldersConfig(clean=clean_paths, report=None)
 
-    validated: list[dict] = []
-    for i, entry in enumerate(data):
+    # ------------------------------------------------------------------
+    # Modern object format
+    # ------------------------------------------------------------------
+    if not isinstance(data, dict):
+        raise ConfigError("folders.json must be a JSON array or object")
+
+    clean_raw = data.get("clean")
+    if not clean_raw or not isinstance(clean_raw, list):
+        raise ConfigError("folders.json must have a non-empty 'clean' array")
+
+    clean_paths = _validate_clean_entries(clean_raw)
+
+    report_data = data.get("report")
+    report: ReportConfig | None = None
+    if report_data is not None:
+        source = (report_data.get("source_folder") or "").strip()
+        destination = (report_data.get("destination_folder") or "").strip()
+        if not source or not destination:
+            raise ConfigError(
+                "report block requires both 'source_folder' and 'destination_folder' "
+                "(non-empty strings)"
+            )
+        report = ReportConfig(source_folder=source, destination_folder=destination)
+
+    return FoldersConfig(clean=clean_paths, report=report)
+
+
+def _validate_clean_entries(entries: list) -> list[str]:
+    """
+    Validate a list of clean entry dicts and return their path strings.
+
+    Raises:
+        ConfigError: if any entry is malformed or has an invalid path.
+    """
+    validated: list[str] = []
+    for i, entry in enumerate(entries):
         if not isinstance(entry, dict) or "path" not in entry:
-            logger.error("CONFIG | entry[{i}] no tiene clave 'path'", i=i)
-            sys.exit(1)
+            raise ConfigError(f"entry[{i}] is missing the 'path' key")
 
         folder_path: str = entry["path"]
 
         if not folder_path or not folder_path.strip():
-            logger.error("CONFIG | entry[{i}].path está vacío", i=i)
-            sys.exit(1)
+            raise ConfigError(f"entry[{i}].path is empty")
 
         if Path(folder_path).is_absolute():
-            logger.error(
-                "CONFIG | entry[{i}].path es absoluto: {p} — solo paths relativos",
-                i=i, p=folder_path,
+            raise ConfigError(
+                f"entry[{i}].path is absolute: {folder_path!r} — only relative paths allowed"
             )
-            sys.exit(1)
 
         if ".." in Path(folder_path).parts:
-            logger.error(
-                "CONFIG | entry[{i}].path contiene '..': {p} — no permitido",
-                i=i, p=folder_path,
+            raise ConfigError(
+                f"entry[{i}].path contains '..': {folder_path!r} — not allowed"
             )
-            sys.exit(1)
 
-        validated.append(entry)
+        validated.append(folder_path)
 
     return validated
 
