@@ -59,11 +59,36 @@ def configure_env() -> None:
             continue
         break
 
+    # Optional: generate/regenerate FOLDERS_ENCRYPTION_KEY (EU-7)
+    has_existing_key = bool(existing.get("FOLDERS_ENCRYPTION_KEY"))
+    if has_existing_key:
+        regen = questionary.confirm(
+            "FOLDERS_ENCRYPTION_KEY already exists. Regenerate? (old encrypted URLs will become unreadable)",
+            default=False,
+        ).ask()
+        if regen:
+            from cryptography.fernet import Fernet as _Fernet
+            merged_key = _Fernet.generate_key().decode("ascii")
+        else:
+            merged_key = None  # keep existing
+    else:
+        gen_new = questionary.confirm(
+            "Generate a FOLDERS_ENCRYPTION_KEY for report URL encryption?",
+            default=True,
+        ).ask()
+        if gen_new:
+            from cryptography.fernet import Fernet as _Fernet
+            merged_key = _Fernet.generate_key().decode("ascii")
+        else:
+            merged_key = None  # user opted out
+
     ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     merged = dict(existing)
     merged["ONEDRIVE_USERNAME"] = username
     merged["ONEDRIVE_PASSWORD"] = password
     merged["SHAREPOINT_PERSONAL_PATH"] = sharepoint_path
+    if merged_key is not None:
+        merged["FOLDERS_ENCRYPTION_KEY"] = merged_key
     ENV_PATH.write_text("".join(f"{k}={v}\n" for k, v in merged.items()), encoding="utf-8")
     console.print(Text(f"\n.env guardado en {ENV_PATH}", style="bold green3"))
 

@@ -9,6 +9,7 @@ aria-label (el texto de aria-label varía por idioma del tenant).
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from loguru import logger
 
 
 def _resolve_data_dir() -> Path:
@@ -127,6 +128,73 @@ ONEDRIVE_PASSWORD: str = os.getenv("ONEDRIVE_PASSWORD", "")
 SHAREPOINT_PERSONAL_PATH: str = os.getenv("SHAREPOINT_PERSONAL_PATH", "")
 """Path personal del tenant SharePoint, e.g. /personal/carlos_velasco_novahold_com.
 Requerido para OneDrive for Business. Se usa para construir la URL de navegación."""
+
+# ---------------------------------------------------------------------------
+# URL Shortener (fail-open — swap provider by editing .env only)
+# ---------------------------------------------------------------------------
+
+URL_SHORTENER_ENDPOINT: str = os.getenv("URL_SHORTENER_ENDPOINT", "")
+"""API endpoint of the URL shortener.
+GET-based example (is.gd):   https://is.gd/create.php?format=simple
+GET-based example (TinyURL): https://tinyurl.com/api-create.php
+The long URL is appended as &url=<encoded>.
+Leave empty to skip shortening (full OneDrive URL used instead)."""
+
+URL_SHORTENER_API_KEY: str = os.getenv("URL_SHORTENER_API_KEY", "")
+"""API key / bearer token for the shortener. Leave empty for keyless services (is.gd, TinyURL)."""
+
+URL_SHORTENER_KEY_HEADER: str = os.getenv("URL_SHORTENER_KEY_HEADER", "Authorization")
+"""HTTP header used to send the API key. Common values: Authorization, apikey, X-API-Key."""
+
+# ---------------------------------------------------------------------------
+# Encryption (fail-open — EU-1, EU-2, EU-3)
+# ---------------------------------------------------------------------------
+
+
+def _build_fernet(key: bytes):
+    """
+    Build a Fernet instance from *key* bytes.
+
+    Fail-open contract (EU-1, EU-3): if the key is empty, missing, or
+    syntactically invalid the function returns ``None`` and logs a single
+    warning.  It NEVER raises — a missing encryption key must not gate runs.
+
+    Args:
+        key: Raw key bytes, typically the encoded value of
+             ``FOLDERS_ENCRYPTION_KEY`` from ``.env``.
+
+    Returns:
+        A :class:`~cryptography.fernet.Fernet` instance when *key* is valid,
+        or ``None`` when the key is absent or invalid.
+    """
+    if not key:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+        return Fernet(key)
+    except Exception as exc:  # binascii.Error / ValueError for bad keys (EU-3)
+        logger.warning(
+            "FERNET_KEY_INVALID | reason={r} | encrypted_url column will be empty",
+            r=str(exc),
+        )
+        return None
+
+
+_FOLDERS_ENCRYPTION_KEY_RAW: str = os.getenv("FOLDERS_ENCRYPTION_KEY", "")
+
+FERNET = (
+    _build_fernet(_FOLDERS_ENCRYPTION_KEY_RAW.encode())
+    if _FOLDERS_ENCRYPTION_KEY_RAW
+    else None
+)
+"""
+Fernet instance for encrypting report URLs, or ``None`` when
+``FOLDERS_ENCRYPTION_KEY`` is absent or invalid (EU-1, EU-2).
+
+Built once at config import time so that all callers share the same
+instance.  Inject a different instance via the ``fernet=`` parameter in
+:func:`~onedrive_rpa.rpa.reporter.build_report_rows` for testability (EU-2).
+"""
 
 # Selectores del formulario de login de Microsoft (login.microsoftonline.com)
 LOGIN_SELECTORS: dict[str, str] = {

@@ -11,6 +11,8 @@ require an authenticated Playwright page and are integration-tested manually.
 import os
 import secrets
 import tempfile
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field as dc_field
 from datetime import datetime
 from io import BytesIO
@@ -70,6 +72,95 @@ def build_report_filename(now: datetime | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# URL assembly helper (EU-5)
+# ---------------------------------------------------------------------------
+
+
+def _build_folder_url(source_folder: str, name: str) -> str:
+    """
+    Construct the full OneDrive URL for a subfolder entry.
+
+    Assembles the URL from config constants + per-row inputs.  Each path
+    segment is stripped of surrounding slashes and URL-encoded individually so
+    that spaces and special characters in folder names are handled correctly.
+    Empty segments (e.g. when ``source_folder`` is ``""``) are filtered out so
+    no double-slash appears in the path.
+
+    Args:
+        source_folder: The parent folder path relative to the Documents library
+                       (e.g. ``"clientes"`` or ``"clientes/"``).
+        name:          The subfolder name (e.g. ``"AlphaClient"``).
+
+    Returns:
+        A fully qualified URL string suitable for Fernet encryption.
+    """
+    base = config.ONEDRIVE_URL.rstrip("/")
+    segments = [
+        config.SHAREPOINT_PERSONAL_PATH,
+        "Documents",
+        source_folder,
+        name,
+    ]
+    encoded_segments = [
+        urllib.parse.quote(seg.strip("/"), safe="/")
+        for seg in segments
+        if seg.strip("/")
+    ]
+    return base + "/" + "/".join(encoded_segments)
+
+
+def _shorten_url(long_url: str) -> str:
+    """Call the configured URL shortener API and return the short URL.
+
+    Provider is fully configurable via .env:
+      - URL_SHORTENER_ENDPOINT  — API endpoint (GET-based, appends &url=<encoded>)
+      - URL_SHORTENER_API_KEY   — optional bearer token / API key
+      - URL_SHORTENER_KEY_HEADER — HTTP header for the key (default: Authorization)
+
+    Fail-open: if the endpoint is not configured, the service is unreachable,
+    or the response is not a valid URL, the original long_url is returned so
+    the report is never blocked by a shortener outage.
+
+    Switching providers requires only editing .env — no code changes.
+
+    Examples (.env):
+        # is.gd (free, no key)
+        URL_SHORTENER_ENDPOINT=https://is.gd/create.php?format=simple
+
+        # TinyURL (free, no key)
+        URL_SHORTENER_ENDPOINT=https://tinyurl.com/api-create.php
+
+        # rebrand.ly (requires API key)
+        URL_SHORTENER_ENDPOINT=https://api.rebrandly.com/v1/links
+        URL_SHORTENER_API_KEY=<your-key>
+        URL_SHORTENER_KEY_HEADER=apikey
+    """
+    endpoint = config.URL_SHORTENER_ENDPOINT
+    if not endpoint:
+        return long_url
+
+    try:
+        sep = "&" if "?" in endpoint else "?"
+        api_url = f"{endpoint}{sep}url={urllib.parse.quote(long_url, safe='')}"
+        headers: dict[str, str] = {"User-Agent": "novahold-rpa/1.0"}
+        if config.URL_SHORTENER_API_KEY:
+            headers[config.URL_SHORTENER_KEY_HEADER or "Authorization"] = config.URL_SHORTENER_API_KEY
+
+        req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            short = resp.read().decode("utf-8").strip()
+
+        if short.startswith("http"):
+            return short
+        logger.warning("URL_SHORTENER | unexpected response={r} | using full URL", r=short[:80])
+        return long_url
+
+    except Exception as exc:
+        logger.warning("URL_SHORTENER_ERROR | reason={r} | using full URL", r=str(exc))
+        return long_url
+
+
+# ---------------------------------------------------------------------------
 # T-08: build_report_rows
 # ---------------------------------------------------------------------------
 
@@ -78,6 +169,8 @@ def build_report_rows(
     folder_names: list[str],
     *,
     now: datetime | None = None,
+    source_folder: str = "",
+    fernet=None,
 ) -> list[dict[str, Any]]:
     """
     Build the list of report row dicts from a list of folder names.
@@ -85,25 +178,48 @@ def build_report_rows(
     Each row contains:
         - folder_name: the folder name as-is
         - password: a freshly generated random password
+        - encrypted_url: Fernet-encrypted OneDrive URL (str), or ``""`` when no
+          key is configured (fail-open, EU-1)
         - creation_date: the ``now`` datetime (or datetime.now())
 
     Args:
         folder_names: Ordered list of folder names to include in the report.
         now: Optional datetime to stamp as the creation date. Defaults to
              datetime.now(). Injecting a fixed value makes tests deterministic.
+        source_folder: Parent folder path relative to Documents (e.g.
+                       ``"clientes"``). Used to build the per-row OneDrive URL.
+        fernet: Optional :class:`~cryptography.fernet.Fernet` instance for
+                encryption.  When ``None``, falls back to ``config.FERNET``.
+                Injecting a value here makes tests independent of the
+                environment (EU-2).
 
     Returns:
         A list of dicts, one per folder name.
     """
     creation_date = now or datetime.now()
-    return [
-        {
-            "folder_name": name,
-            "password": generate_password(),
-            "creation_date": creation_date,
-        }
-        for name in folder_names
-    ]
+    active_fernet = fernet if fernet is not None else config.FERNET
+    rows = []
+    for name in folder_names:
+        url = _build_folder_url(source_folder, name)
+        # Short URL via configured provider (fail-open: falls back to full URL)
+        short_url = _shorten_url(url)
+        # Fernet token kept for auditability — lets you recover the original URL
+        # from the token even if the shortener link expires.
+        if active_fernet is not None:
+            encrypted_url: str = active_fernet.encrypt(url.encode()).decode("ascii")
+        else:
+            encrypted_url = ""
+        rows.append(
+            {
+                "folder_name": name,
+                "password": generate_password(),
+                "short_url": short_url,
+                "encrypted_url": encrypted_url,
+                "folder_url": url,
+                "creation_date": creation_date,
+            }
+        )
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +250,25 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
     ws = wb.active
     ws.title = "Report"
 
-    headers = ["Folder Name", "Password", "Creation Date"]
+    headers = ["Folder Name", "Password", "URL", "Creation Date"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
     for row in rows:
-        ws.append([row["folder_name"], row["password"], row["creation_date"]])
+        short_url = row.get("short_url") or row.get("folder_url", "")
+        ws.append([
+            row["folder_name"],
+            row["password"],
+            short_url,
+            row["creation_date"],
+        ])
+        # The short URL is both the display text AND the hyperlink target —
+        # copy-pasting it works, clicking it works, and no SharePoint path is visible.
+        if short_url:
+            url_cell = ws.cell(row=ws.max_row, column=3)
+            url_cell.hyperlink = short_url
+            url_cell.font = Font(color="0563C1", underline="single")
 
     buf = BytesIO()
     wb.save(buf)
@@ -282,44 +410,43 @@ def upload_report(
         target_path = Path(tmp.name).parent / filename
         os.replace(tmp.name, target_path)
 
-        # Shape A: input[type='file'] ya adjunto en el DOM (sin clic previo).
-        # En algunas versiones de SharePoint el input está presente al cargar la página.
-        shape_a_ok = False
+        # Shape A is intentionally SKIPPED here.
+        # A stale input[type='file'] left in the DOM from the deletion phase
+        # belongs to a different folder context — using it would upload to the
+        # wrong folder.  We always go through Shape B so the navigation to
+        # destination_folder is the authoritative upload context.
+
+        # Shape B: click "Crear o cargar" → "Carga de archivos".
+        # SharePoint triggers a native OS file chooser when the submenu item
+        # is clicked.  We MUST register expect_file_chooser BEFORE the click
+        # so Playwright intercepts the dialog before it blocks execution.
+        _click_first_matching(page, SELECTORS["toolbar_upload"].split(", "), ACTION_TIMEOUT_MS)
+
+        # Wait for the submenu item itself to become visible — more reliable
+        # than waiting for a generic [role='menu'] container that may not match.
+        # Falls back to a fixed 800 ms pause if the selector doesn't resolve.
+        submenu_selectors = ", ".join([
+            "[data-automationid='uploadFilesCommand']",
+            "[data-automationid='uploadFileCommand']",
+            "[role='menuitem']:has-text('Carga de archivos')",
+            "button:has-text('Carga de archivos')",
+        ])
         try:
-            hidden_input = page.locator(SELECTORS["upload_file_input"]).first
-            hidden_input.wait_for(state="attached", timeout=4_000)
-            hidden_input.set_input_files(str(target_path))
-            shape_a_ok = True
+            page.wait_for_selector(submenu_selectors, timeout=5_000, state="visible")
         except Exception:
-            pass
+            page.wait_for_timeout(800)
 
-        if not shape_a_ok:
-            # Shape B: click "Crear o cargar" → "Carga de archivos".
-            # SharePoint triggers a native OS file chooser when the submenu item
-            # is clicked.  We MUST register expect_file_chooser BEFORE the click
-            # so Playwright intercepts the dialog before it blocks execution.
-            # (Earlier attempts with expect_file_chooser failed because the toolbar
-            # click was silently failing with an unmatched selector — the dialog
-            # never opened.  Now that the toolbar selector is fixed, the OS dialog
-            # does open and expect_file_chooser can catch it.)
-            _click_first_matching(page, SELECTORS["toolbar_upload"].split(", "), ACTION_TIMEOUT_MS)
-            # Wait for the dropdown menu to be visible instead of a fixed pause.
-            try:
-                page.wait_for_selector("[role='menu'], [role='listbox']", timeout=3_000, state="visible")
-            except Exception:
-                pass  # proceed anyway — the submenu click will fail and fallback handles it
-
-            try:
-                with page.expect_file_chooser(timeout=15_000) as fc_info:
-                    _click_first_matching(
-                        page, SELECTORS["upload_files_menuitem"].split(", "), 3_000
-                    )
-                fc_info.value.set_files(str(target_path))
-            except Exception:
-                # Fallback: some SP versions inject the input without OS dialog
-                hidden_input = page.locator(SELECTORS["upload_file_input"]).first
-                hidden_input.wait_for(state="attached", timeout=10_000)
-                hidden_input.set_input_files(str(target_path))
+        try:
+            with page.expect_file_chooser(timeout=15_000) as fc_info:
+                _click_first_matching(
+                    page, SELECTORS["upload_files_menuitem"].split(", "), 3_000
+                )
+            fc_info.value.set_files(str(target_path))
+        except Exception:
+            # Fallback: some SP versions inject the input without OS dialog
+            hidden_input = page.locator(SELECTORS["upload_file_input"]).first
+            hidden_input.wait_for(state="attached", timeout=10_000)
+            hidden_input.set_input_files(str(target_path))
 
         # Wait for the uploaded file row to appear as confirmation.
         # Try two selectors: heroField (SharePoint item name) and a broad text match.
@@ -397,7 +524,7 @@ def run_report(
         if callbacks and hasattr(callbacks, "on_report_subfolders"):
             callbacks.on_report_subfolders(len(subfolders))
 
-        rows = build_report_rows(subfolders)
+        rows = build_report_rows(subfolders, source_folder=source_folder, fernet=config.FERNET)
         stats.rows_generated = len(rows)
 
         excel_buf = write_excel(rows)
