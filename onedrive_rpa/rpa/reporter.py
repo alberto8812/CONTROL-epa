@@ -112,46 +112,73 @@ def _build_folder_url(source_folder: str, name: str) -> str:
 def _shorten_url(long_url: str) -> str:
     """Call the configured URL shortener API and return the short URL.
 
-    Provider is fully configurable via .env:
-      - URL_SHORTENER_ENDPOINT  — API endpoint (GET-based, appends &url=<encoded>)
-      - URL_SHORTENER_API_KEY   — optional bearer token / API key
-      - URL_SHORTENER_KEY_HEADER — HTTP header for the key (default: Authorization)
+    Supports GET providers (is.gd, TinyURL) and POST providers (Rebrandly).
+    All behaviour is controlled via .env — no code changes to switch providers.
 
-    Fail-open: if the endpoint is not configured, the service is unreachable,
-    or the response is not a valid URL, the original long_url is returned so
-    the report is never blocked by a shortener outage.
-
-    Switching providers requires only editing .env — no code changes.
-
-    Examples (.env):
-        # is.gd (free, no key)
+    .env examples:
+        # is.gd (GET, no key)
         URL_SHORTENER_ENDPOINT=https://is.gd/create.php?format=simple
+        URL_SHORTENER_METHOD=GET
 
-        # TinyURL (free, no key)
-        URL_SHORTENER_ENDPOINT=https://tinyurl.com/api-create.php
-
-        # rebrand.ly (requires API key)
+        # Rebrandly (POST, requires API key)
         URL_SHORTENER_ENDPOINT=https://api.rebrandly.com/v1/links
+        URL_SHORTENER_METHOD=POST
         URL_SHORTENER_API_KEY=<your-key>
         URL_SHORTENER_KEY_HEADER=apikey
+        URL_SHORTENER_BODY_KEY=destination
+        URL_SHORTENER_RESPONSE_KEY=shortUrl
+        URL_SHORTENER_DOMAIN=rebrand.ly   # optional
+
+    Fail-open: any error returns the original long_url.
     """
+    import json as _json
+    import ssl
+
     endpoint = config.URL_SHORTENER_ENDPOINT
     if not endpoint:
         return long_url
 
     try:
-        sep = "&" if "?" in endpoint else "?"
-        api_url = f"{endpoint}{sep}url={urllib.parse.quote(long_url, safe='')}"
-        headers: dict[str, str] = {"User-Agent": "novahold-rpa/1.0"}
+        # Use certifi's CA bundle — fixes SSL errors on macOS where Python's
+        # urllib does not pick up the system certificate store by default.
+        try:
+            import certifi
+            ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            ssl_ctx = ssl.create_default_context()
+
+        headers: dict[str, str] = {
+            "User-Agent": "novahold-rpa/1.0",
+            "Content-Type": "application/json",
+        }
         if config.URL_SHORTENER_API_KEY:
             headers[config.URL_SHORTENER_KEY_HEADER or "Authorization"] = config.URL_SHORTENER_API_KEY
 
-        req = urllib.request.Request(api_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            short = resp.read().decode("utf-8").strip()
+        if config.URL_SHORTENER_METHOD == "POST":
+            body: dict = {config.URL_SHORTENER_BODY_KEY or "destination": long_url}
+            if config.URL_SHORTENER_DOMAIN:
+                body["domain"] = {"fullName": config.URL_SHORTENER_DOMAIN}
+            data = _json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+        else:
+            sep = "&" if "?" in endpoint else "?"
+            api_url = f"{endpoint}{sep}url={urllib.parse.quote(long_url, safe='')}"
+            req = urllib.request.Request(api_url, headers=headers)
+
+        with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
+            raw = resp.read().decode("utf-8").strip()
+
+        response_key = config.URL_SHORTENER_RESPONSE_KEY
+        if response_key:
+            short = str(_json.loads(raw).get(response_key, ""))
+        else:
+            short = raw
 
         if short.startswith("http"):
             return short
+        # Some providers (e.g. Rebrandly) return the short URL without scheme.
+        if short and "." in short and not short.startswith("{"):
+            return f"https://{short}"
         logger.warning("URL_SHORTENER | unexpected response={r} | using full URL", r=short[:80])
         return long_url
 
@@ -171,13 +198,15 @@ def build_report_rows(
     now: datetime | None = None,
     source_folder: str = "",
     fernet=None,
+    passwords: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build the list of report row dicts from a list of folder names.
 
     Each row contains:
         - folder_name: the folder name as-is
-        - password: a freshly generated random password
+        - password: pre-generated password from *passwords* map when available,
+          otherwise a freshly generated random password
         - encrypted_url: Fernet-encrypted OneDrive URL (str), or ``""`` when no
           key is configured (fail-open, EU-1)
         - creation_date: the ``now`` datetime (or datetime.now())
@@ -192,6 +221,11 @@ def build_report_rows(
                 encryption.  When ``None``, falls back to ``config.FERNET``.
                 Injecting a value here makes tests independent of the
                 environment (EU-2).
+        passwords: Optional pre-generated password map keyed by folder base name.
+                   When a key matching the folder name is found, that value is
+                   used instead of calling ``generate_password()``.  When
+                   ``None`` or the key is absent, falls back to
+                   ``generate_password()`` (backward compatible).
 
     Returns:
         A list of dicts, one per folder name.
@@ -209,10 +243,12 @@ def build_report_rows(
             encrypted_url: str = active_fernet.encrypt(url.encode()).decode("ascii")
         else:
             encrypted_url = ""
+        # Use pre-generated password when provided; fall back to fresh generation
+        pwd = passwords.get(name) if passwords else None
         rows.append(
             {
                 "folder_name": name,
-                "password": generate_password(),
+                "password": pwd or generate_password(),
                 "short_url": short_url,
                 "encrypted_url": encrypted_url,
                 "folder_url": url,
@@ -487,6 +523,7 @@ def run_report(
     destination_folder: str,
     *,
     callbacks=None,
+    passwords: dict[str, str] | None = None,
 ) -> ReportStats:
     """Orchestrate collect → build rows → write Excel → upload.
 
@@ -499,6 +536,11 @@ def run_report(
         destination_folder: Folder where the Excel report is uploaded.
         callbacks: Optional RPACallbacks-compatible object. Calls are guarded
                    with hasattr so any subset of callbacks is acceptable.
+        passwords: Optional pre-generated password map (keyed by folder base
+                   name) forwarded to ``build_report_rows()``.  When provided,
+                   ensures the password in the report matches the one set on the
+                   sharing link.  When ``None``, each row generates a fresh
+                   password (backward compatible).
 
     Returns:
         ReportStats with counts, filename, and any errors encountered.
@@ -524,7 +566,9 @@ def run_report(
         if callbacks and hasattr(callbacks, "on_report_subfolders"):
             callbacks.on_report_subfolders(len(subfolders))
 
-        rows = build_report_rows(subfolders, source_folder=source_folder, fernet=config.FERNET)
+        rows = build_report_rows(
+            subfolders, source_folder=source_folder, fernet=config.FERNET, passwords=passwords
+        )
         stats.rows_generated = len(rows)
 
         excel_buf = write_excel(rows)

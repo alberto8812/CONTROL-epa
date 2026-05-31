@@ -67,6 +67,8 @@ _EVENTS: dict[str, tuple[str, str]] = {
     "INFO":   ("·", _C_DIM),
     "REPORT": ("▣", "bold cyan"),
     "UPLOAD": ("↑", "bold blue"),
+    "SHARE":  ("⚿", "bold green3"),
+    "SHAERR": ("⚿", "bold red3"),
 }
 
 

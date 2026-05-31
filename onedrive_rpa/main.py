@@ -29,6 +29,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Permite correr como script directo: python main.py o python onedrive_rpa/main.py
@@ -38,6 +39,7 @@ import click
 from loguru import logger
 from playwright.sync_api import sync_playwright
 
+from onedrive_rpa import config
 from onedrive_rpa.config import FOLDERS_PATH
 from onedrive_rpa.auth.session import (
     load_or_login,
@@ -46,6 +48,8 @@ from onedrive_rpa.auth.session import (
 )
 from onedrive_rpa.rpa.cleaner import FolderCleaner, CleanStats, FolderNotFoundError
 from onedrive_rpa.rpa.logger import configure_logging
+from onedrive_rpa.rpa.reporter import generate_password
+from onedrive_rpa.rpa.sharer import share_folder, ShareStats, folder_key
 from onedrive_rpa.rpa.ui import RPADisplay
 
 
@@ -177,6 +181,14 @@ def main(
     browser = None
     global_stats = CleanStats()
 
+    # Pre-generate per-folder passwords (single source of truth for share link + report)
+    share_passwords: dict[str, str] = {
+        folder_key(fp): generate_password()
+        for fp in folder_paths
+    }
+    share_expiry: datetime = datetime.now() + timedelta(days=config.SHARE_EXPIRY_DAYS)
+    global_share_stats = ShareStats()
+
     display = RPADisplay(mode=mode, dry_run=dry_run, folders=folder_paths)
 
     try:
@@ -190,11 +202,11 @@ def main(
                 )
             except SessionMissingError as exc:
                 logger.error("AUTH | {msg}", msg=str(exc))
-                _emit_summary(global_stats, start_time)
+                _emit_summary(global_stats, start_time, global_share_stats)
                 sys.exit(2)
             except SessionExpiredError as exc:
                 logger.error("AUTH | {msg}", msg=str(exc))
-                _emit_summary(global_stats, start_time)
+                _emit_summary(global_stats, start_time, global_share_stats)
                 sys.exit(3)
 
             # -----------------------------------------------------------------
@@ -206,11 +218,29 @@ def main(
                 try:
                     stats = cleaner.clean(folder_path)
                     global_stats.merge(stats)
+                    # Share the folder after a successful clean (skip in dry-run)
+                    if not dry_run:
+                        key = folder_key(folder_path)
+                        password = share_passwords.get(key, generate_password())
+                        share_result = share_folder(page, folder_path, password, share_expiry)
+                        global_share_stats.shared.extend(share_result.shared)
+                        global_share_stats.share_errors.extend(share_result.share_errors)
+                        # Emit share result to TUI activity log
+                        expiry_str = share_expiry.strftime("%d/%m/%Y")
+                        if share_result.shared:
+                            display.log("SHARE", f"{folder_path}  ·  vínculo compartido  ·  expira {expiry_str}")
+                        if share_result.share_errors:
+                            display.log("SHAERR", f"{folder_path}  ·  error al compartir")
+                    else:
+                        logger.debug(
+                            "dry-run: skipping share for {folder_path}",
+                            folder_path=folder_path,
+                        )
                 except FolderNotFoundError:
                     global_stats.skipped.append(folder_path)
                 except SessionExpiredError as exc:
                     logger.error("SESSION_EXPIRED | {msg}", msg=str(exc))
-                    _emit_summary(global_stats, start_time)
+                    _emit_summary(global_stats, start_time, global_share_stats)
                     if browser:
                         browser.close()
                     sys.exit(3)
@@ -239,6 +269,7 @@ def main(
                     folders_config.report.source_folder,
                     folders_config.report.destination_folder,
                     callbacks=display.callbacks,
+                    passwords=share_passwords,
                 )
             elif folders_config.report is not None and dry_run:
                 logger.info("REPORT | SKIPPED | reason=dry_run")
@@ -252,13 +283,13 @@ def main(
 
     except KeyboardInterrupt:
         logger.warning("INTERRUPTED | Ctrl+C detectado")
-        _emit_summary(global_stats, start_time)
+        _emit_summary(global_stats, start_time, global_share_stats)
         sys.exit(130)
 
     # -----------------------------------------------------------------------
     # 5. Summary final
     # -----------------------------------------------------------------------
-    _emit_summary(global_stats, start_time)
+    _emit_summary(global_stats, start_time, global_share_stats)
 
 
 # ---------------------------------------------------------------------------
@@ -393,19 +424,28 @@ def _confirm_destructive_run(folder_paths: list[str]) -> None:
     click.echo()  # línea en blanco antes del run
 
 
-def _emit_summary(stats: CleanStats, start_time: float) -> None:
+def _emit_summary(
+    stats: CleanStats,
+    start_time: float,
+    share_stats: ShareStats | None = None,
+) -> None:
     """
     Emite el resumen de la corrida al finalizar (normal o abortada).
     Spec: audit-logging — run summary on exit.
     """
     elapsed = time.monotonic() - start_time
+    shared_count = len(share_stats.shared) if share_stats else 0
+    share_error_count = len(share_stats.share_errors) if share_stats else 0
     logger.info(
         "RUN END | deleted={deleted} | would_delete={would_delete} | "
-        "skipped={skipped} | errors={errors} | elapsed={elapsed:.1f}s",
+        "skipped={skipped} | errors={errors} | "
+        "Shared: {shared}, Share errors: {share_errors} | elapsed={elapsed:.1f}s",
         deleted=len(stats.deleted),
         would_delete=len(stats.would_delete),
         skipped=len(stats.skipped),
         errors=len(stats.errors),
+        shared=shared_count,
+        share_errors=share_error_count,
         elapsed=elapsed,
     )
 

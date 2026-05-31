@@ -135,16 +135,30 @@ Requerido para OneDrive for Business. Se usa para construir la URL de navegació
 
 URL_SHORTENER_ENDPOINT: str = os.getenv("URL_SHORTENER_ENDPOINT", "")
 """API endpoint of the URL shortener.
-GET-based example (is.gd):   https://is.gd/create.php?format=simple
-GET-based example (TinyURL): https://tinyurl.com/api-create.php
-The long URL is appended as &url=<encoded>.
-Leave empty to skip shortening (full OneDrive URL used instead)."""
+GET-based (is.gd):      https://is.gd/create.php?format=simple
+GET-based (TinyURL):    https://tinyurl.com/api-create.php
+POST-based (Rebrandly): https://api.rebrandly.com/v1/links
+Leave empty to skip shortening."""
 
 URL_SHORTENER_API_KEY: str = os.getenv("URL_SHORTENER_API_KEY", "")
-"""API key / bearer token for the shortener. Leave empty for keyless services (is.gd, TinyURL)."""
+"""API key / bearer token. Leave empty for keyless services (is.gd, TinyURL)."""
 
 URL_SHORTENER_KEY_HEADER: str = os.getenv("URL_SHORTENER_KEY_HEADER", "Authorization")
-"""HTTP header used to send the API key. Common values: Authorization, apikey, X-API-Key."""
+"""HTTP header for the API key. Rebrandly uses 'apikey'."""
+
+URL_SHORTENER_METHOD: str = os.getenv("URL_SHORTENER_METHOD", "GET").upper()
+"""HTTP method: GET (appends ?url=<encoded>) or POST (sends JSON body). Rebrandly requires POST."""
+
+URL_SHORTENER_BODY_KEY: str = os.getenv("URL_SHORTENER_BODY_KEY", "destination")
+"""JSON key for the long URL in POST body. Rebrandly uses 'destination'."""
+
+URL_SHORTENER_RESPONSE_KEY: str = os.getenv("URL_SHORTENER_RESPONSE_KEY", "shortUrl")
+"""JSON key to extract from POST response. Rebrandly returns 'shortUrl'.
+Empty string → treat response as plain text (GET providers like is.gd, TinyURL)."""
+
+URL_SHORTENER_DOMAIN: str = os.getenv("URL_SHORTENER_DOMAIN", "")
+"""Rebrandly: short domain fullName, e.g. 'rebrand.ly' or a custom domain.
+Leave empty to use Rebrandly's default workspace domain."""
 
 # ---------------------------------------------------------------------------
 # Encryption (fail-open — EU-1, EU-2, EU-3)
@@ -278,4 +292,62 @@ SELECTORS: dict[str, str] = {
 
     # Input de tipo file que SharePoint inyecta al hacer clic en "Archivos".
     "upload_file_input": "input[type='file']",
+}
+
+# ---------------------------------------------------------------------------
+# Sharing — Selectors and constants
+# ---------------------------------------------------------------------------
+
+SHARE_EXPIRY_DAYS: int = 9
+"""Number of days from today until the sharing link expires."""
+
+SHARE_SELECTORS: dict[str, str] = {
+    # Toolbar share button — "Compartir" / "Share"
+    "share_button": (
+        "[data-automationid='shareCommand'], "
+        "button[title='Compartir'], "
+        "button[aria-label='Compartir'], "
+        "button[title='Share'], "
+        "button[aria-label='Share']"
+    ),
+    # "Cualquier persona" (Anyone) — DOM-confirmed: role=radio, data-key='2'
+    "anyone_option": (
+        "[role='radio'][data-key='2'], "
+        ".od-AudienceChoiceGroup-main[data-key='2'], "
+        "[role='radio'][aria-label*='Cualquier persona']"
+    ),
+    # Expiry date input — DOM-confirmed: aria-label='Establecer fecha de expiración'
+    # IMPORTANT: readonly='' — .fill()/.clear() do NOT work.
+    # Must use click + page.keyboard.type() to set the date.
+    "expiry_input": (
+        "input[aria-label='Establecer fecha de expiración'], "
+        "input[placeholder*='DD/MM/YYYY'], "
+        "#datePicker-input20"
+    ),
+    # Password input — DOM-confirmed: data-automationid='share_link_password'
+    "password_input": (
+        "[data-automationid='share_link_password'], "
+        "input[aria-label='Campo de contraseña'], "
+        "input[name='password'][type='password']"
+    ),
+    # Selector for the share dialog iframe itself (on the main page).
+    "share_iframe": "iframe[name='shareFrame']",
+    # Gear icon ⚙️ inside the shareFrame iframe — data-automationid confirmed via DOM probe.
+    "settings_button": (
+        "[data-automationid='Footer-button-settings'], "
+        "#Footer-button-settings, "
+        "button[aria-label='Configuración de vínculos'], "
+        "button[aria-label='Link settings']"
+    ),
+    # Apply button — DOM-confirmed: class includes od-ModifyPermissions-apply
+    "apply_button": (
+        "button.od-ModifyPermissions-apply, "
+        "[id*='od-ModifyPermissions-apply'], "
+        "button:has-text('Aplicar')"
+    ),
+    # Checkbox cell inside a folder row (for selection before sharing).
+    # Click the container div — same pattern as select_all in SELECTORS.
+    # Do NOT include the inner input[type='checkbox'] as a fallback: both the
+    # container and the input exist within the row, causing a strict mode violation.
+    "row_checkbox": "[data-automationid^='row-selection']",
 }

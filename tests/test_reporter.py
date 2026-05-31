@@ -394,5 +394,55 @@ class TestConfigFernet(unittest.TestCase):
 import os  # needed for TestConfigFernet
 
 
+# ---------------------------------------------------------------------------
+# Task 4.4 (folder-sharing-link): TestBuildReportRowsPasswords
+# ---------------------------------------------------------------------------
+
+
+class TestBuildReportRowsPasswords(unittest.TestCase):
+    """Tests for build_report_rows() passwords= parameter (folder-sharing-link, task 3.1)."""
+
+    def _import(self):
+        from onedrive_rpa.rpa.reporter import build_report_rows
+        return build_report_rows
+
+    def test_build_report_rows_uses_injected_passwords(self):
+        """When passwords={"alpha": "mypass"} and folder name is "alpha", row password must be "mypass"."""
+        build_report_rows = self._import()
+        rows = build_report_rows(["alpha"], passwords={"alpha": "mypass"})
+        self.assertEqual(rows[0]["password"], "mypass")
+
+    def test_build_report_rows_fallback_when_name_missing(self):
+        """When passwords={"other": "x"} and folder name is "alpha", a fresh password is generated."""
+        build_report_rows = self._import()
+        rows = build_report_rows(["alpha"], passwords={"other": "x"})
+        # Must not raise and must produce a non-empty password that is NOT "x"
+        self.assertTrue(rows[0]["password"])
+        self.assertNotEqual(rows[0]["password"], "x")
+
+    def test_build_report_rows_passwords_none_uses_generate(self):
+        """When passwords=None (default), generate_password() is called for each row."""
+        build_report_rows = self._import()
+        rows = build_report_rows(["alpha", "beta"])
+        # Both rows must have non-empty passwords
+        for row in rows:
+            self.assertTrue(row["password"])
+
+    def test_build_report_rows_empty_passwords_dict_fallback(self):
+        """When passwords={} (empty dict) and folder name present, generate_password() used — no error."""
+        build_report_rows = self._import()
+        rows = build_report_rows(["alpha"], passwords={})
+        self.assertTrue(rows[0]["password"])
+
+    def test_build_report_rows_multiple_folders_correct_mapping(self):
+        """Each folder gets its own password from the map."""
+        build_report_rows = self._import()
+        pwd_map = {"alpha": "pass_alpha", "beta": "pass_beta", "gamma": "pass_gamma"}
+        rows = build_report_rows(["alpha", "beta", "gamma"], passwords=pwd_map)
+        self.assertEqual(rows[0]["password"], "pass_alpha")
+        self.assertEqual(rows[1]["password"], "pass_beta")
+        self.assertEqual(rows[2]["password"], "pass_gamma")
+
+
 if __name__ == "__main__":
     unittest.main()
