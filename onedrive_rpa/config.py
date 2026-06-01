@@ -350,4 +350,19 @@ SHARE_SELECTORS: dict[str, str] = {
     # Do NOT include the inner input[type='checkbox'] as a fallback: both the
     # container and the input exist within the row, causing a strict mode violation.
     "row_checkbox": "[data-automationid^='row-selection']",
+    # "Copiar vínculo" / "Copy link" button in the invite panel footer.
+    # Follows same data-automationid naming pattern as Footer-button-settings (gear).
+    "copy_link_button": (
+        "[data-automationid='Footer-button-copy'], "
+        "button[aria-label='Copiar vínculo'], "
+        "button[aria-label='Copy link'], "
+        "button:has-text('Copiar vínculo')"
+    ),
+    # "Usar nueva contraseña" button in the "¿Quieres actualizar el vínculo?" confirmation dialog.
+    # This dialog appears inside shareFrame when trying to set a new password on a link that
+    # already has a password configured. Must be dismissed before Apply becomes clickable.
+    "use_new_password_button": (
+        "button:has-text('Usar nueva contraseña'), "
+        "button:has-text('Use new password')"
+    ),
 }

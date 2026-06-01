@@ -225,6 +225,7 @@ def main(
                         share_result = share_folder(page, folder_path, password, share_expiry)
                         global_share_stats.shared.extend(share_result.shared)
                         global_share_stats.share_errors.extend(share_result.share_errors)
+                        global_share_stats.share_urls.update(share_result.share_urls)
                         # Emit share result to TUI activity log
                         expiry_str = share_expiry.strftime("%d/%m/%Y")
                         if share_result.shared:
@@ -270,6 +271,7 @@ def main(
                     folders_config.report.destination_folder,
                     callbacks=display.callbacks,
                     passwords=share_passwords,
+                    share_urls=global_share_stats.share_urls,
                 )
             elif folders_config.report is not None and dry_run:
                 logger.info("REPORT | SKIPPED | reason=dry_run")

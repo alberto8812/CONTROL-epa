@@ -120,6 +120,27 @@ class TestShareStats(unittest.TestCase):
         stats_a.shared.append("a")
         self.assertEqual(stats_b.shared, [])
 
+    def test_sharestate_default_share_urls_empty(self):
+        """ShareStats() must have share_urls == {}."""
+        ShareStats = self._import()
+        stats = ShareStats()
+        self.assertEqual(stats.share_urls, {})
+
+    def test_sharestate_share_urls_accepts_entries(self):
+        """share_urls dict must accept folder_key -> URL entries."""
+        ShareStats = self._import()
+        stats = ShareStats()
+        stats.share_urls["archivos_1"] = "https://archacomco-my.sharepoint.com/:f:/r/test"
+        self.assertEqual(stats.share_urls["archivos_1"], "https://archacomco-my.sharepoint.com/:f:/r/test")
+
+    def test_sharestate_share_urls_instances_are_independent(self):
+        """Two ShareStats instances must not share the share_urls dict reference."""
+        ShareStats = self._import()
+        stats_a = ShareStats()
+        stats_b = ShareStats()
+        stats_a.share_urls["a"] = "https://example.com/a"
+        self.assertEqual(stats_b.share_urls, {})
+
 
 if __name__ == "__main__":
     unittest.main()

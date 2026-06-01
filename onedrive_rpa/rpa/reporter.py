@@ -11,6 +11,7 @@ require an authenticated Playwright page and are integration-tested manually.
 import os
 import secrets
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field as dc_field
@@ -182,6 +183,19 @@ def _shorten_url(long_url: str) -> str:
         logger.warning("URL_SHORTENER | unexpected response={r} | using full URL", r=short[:80])
         return long_url
 
+    except urllib.error.HTTPError as exc:
+        # Capture response body for richer diagnostics (e.g. Rebrandly quota exceeded)
+        try:
+            body = exc.read().decode("utf-8")[:300]
+        except Exception:
+            body = ""
+        logger.warning(
+            "URL_SHORTENER_ERROR | status={s} | reason={r} | detail={d} | using full URL",
+            s=exc.code,
+            r=exc.reason,
+            d=body,
+        )
+        return long_url
     except Exception as exc:
         logger.warning("URL_SHORTENER_ERROR | reason={r} | using full URL", r=str(exc))
         return long_url
@@ -199,6 +213,7 @@ def build_report_rows(
     source_folder: str = "",
     fernet=None,
     passwords: dict[str, str] | None = None,
+    share_urls: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build the list of report row dicts from a list of folder names.
@@ -226,6 +241,12 @@ def build_report_rows(
                    used instead of calling ``generate_password()``.  When
                    ``None`` or the key is absent, falls back to
                    ``generate_password()`` (backward compatible).
+        share_urls: Optional map of folder base name -> OneDrive sharing URL
+                    captured from the "Copiar vínculo" button after sharing.
+                    When provided, the sharing URL is used as-is instead of the
+                    path-based URL built by ``_build_folder_url()``.  When
+                    ``None`` or a folder has no entry, falls back to the
+                    constructed URL (backward compatible, fail-open).
 
     Returns:
         A list of dicts, one per folder name.
@@ -234,7 +255,9 @@ def build_report_rows(
     active_fernet = fernet if fernet is not None else config.FERNET
     rows = []
     for name in folder_names:
-        url = _build_folder_url(source_folder, name)
+        # Use the real OneDrive sharing URL when available (captured from
+        # "Copiar vínculo" after sharing); fall back to the constructed path URL.
+        url = (share_urls.get(name) if share_urls else None) or _build_folder_url(source_folder, name)
         # Short URL via configured provider (fail-open: falls back to full URL)
         short_url = _shorten_url(url)
         # Fernet token kept for auditability — lets you recover the original URL
@@ -524,6 +547,7 @@ def run_report(
     *,
     callbacks=None,
     passwords: dict[str, str] | None = None,
+    share_urls: dict[str, str] | None = None,
 ) -> ReportStats:
     """Orchestrate collect → build rows → write Excel → upload.
 
@@ -567,7 +591,8 @@ def run_report(
             callbacks.on_report_subfolders(len(subfolders))
 
         rows = build_report_rows(
-            subfolders, source_folder=source_folder, fernet=config.FERNET, passwords=passwords
+            subfolders, source_folder=source_folder, fernet=config.FERNET,
+            passwords=passwords, share_urls=share_urls,
         )
         stats.rows_generated = len(rows)
 

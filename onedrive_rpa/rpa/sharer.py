@@ -45,6 +45,9 @@ class ShareStats:
     share_errors: list[str] = field(default_factory=list)
     """base_name of each folder where sharing failed."""
 
+    share_urls: dict = field(default_factory=dict)
+    """Mapping of folder base_name -> OneDrive sharing URL captured from 'Copiar vínculo'."""
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers — no Playwright dependency
@@ -82,6 +85,50 @@ def _format_expiry(dt: datetime) -> str:
 # ---------------------------------------------------------------------------
 # Private Playwright helpers
 # ---------------------------------------------------------------------------
+
+
+def _scan_iframe_for_share_url(frame) -> "str | None":
+    """Scan the shareFrame iframe HTML for an OneDrive sharing URL.
+
+    OneDrive sharing URLs always contain ``/:f:/`` (folder) or ``/:b:/`` (file)
+    in the path, which distinguishes them from plain SharePoint path URLs that
+    require authentication.  Scanning the rendered HTML is more reliable than
+    clipboard APIs in headless Playwright because it needs no permissions and is
+    unaffected by iframe navigations or async clipboard writes.
+
+    Args:
+        frame: The shareFrame Frame object (may be None).
+
+    Returns:
+        The first sharing URL found, or ``None`` if not found.
+    """
+    if frame is None:
+        return None
+    try:
+        result = frame.evaluate("""() => {
+            // Primary: regex search across rendered HTML for /:f:/ or /:b:/ pattern
+            const html = document.documentElement.innerHTML;
+            const re = /https:[^\\s"'<>]+\\/:[fb]:[^\\s"'<>]+/;
+            const m = html.match(re);
+            if (m) return m[0];
+
+            // Fallback: scan all element attributes for a URL with ?e= (sharing token)
+            for (const el of document.querySelectorAll('*')) {
+                for (const attr of el.attributes) {
+                    const v = attr.value;
+                    if (v && v.startsWith('http') && v.includes('sharepoint') &&
+                        (v.includes(':f:') || v.includes('?e='))) {
+                        return v;
+                    }
+                }
+            }
+            return null;
+        }""")
+        if result and isinstance(result, str) and result.startswith("http"):
+            return result
+    except Exception:
+        pass
+    return None
 
 
 def _get_share_frame(page: "Page"):  # type: ignore[name-defined]
@@ -132,8 +179,10 @@ def _open_share_dialog(page: "Page", folder_name: str) -> None:  # type: ignore[
 
     OneDrive opens a two-step share flow:
       1. "Compartir" toolbar button → people-invite panel (name / email input)
-      2. Gear icon ⚙️ inside that panel → "Configuración de vínculos" settings panel
-         (where expiry date and password fields live)
+      2. Gear icon ⚙️ → "Configuración de vínculos" settings panel (expiry / password).
+
+    URL capture happens AFTER Apply (in ``_click_apply``), once password and expiry are
+    configured — so the link used in the report matches the fully-configured share link.
 
     Decorated with @with_retry() — idempotent (unlike delete, ADR-7).
 
@@ -170,9 +219,16 @@ def _open_share_dialog(page: "Page", folder_name: str) -> None:  # type: ignore[
     # All further dialog interactions happen inside the iframe
     frame = _get_share_frame(page)
 
-    # Step 2: Wait for the gear icon inside the iframe, then click it
+    # Wait for invite panel to fully render — gear icon is a reliable proxy for both
+    # the gear and the "Copiar vínculo" button being present in the invite panel footer.
     try:
         frame.wait_for_selector(SHARE_SELECTORS["settings_button"], state="visible", timeout=ACTION_TIMEOUT_MS)
+    except Exception as exc:
+        raise ShareError(f"Invite panel gear icon did not appear for {folder_name!r}: {exc}") from exc
+
+    # Step 2: Click the gear → opens "Configuración de vínculos" settings panel
+    # URL capture happens AFTER Apply (in _click_apply), once password and expiry are set.
+    try:
         frame.click(SHARE_SELECTORS["settings_button"], timeout=ACTION_TIMEOUT_MS)
     except Exception as exc:
         raise ShareError(f"Could not click settings gear for {folder_name!r}: {exc}") from exc
@@ -234,12 +290,37 @@ def _apply_share_settings(page: "Page", password: str, expiry_str: str) -> None:
     except Exception as exc:
         raise ShareError(f"Could not fill password field: {exc}") from exc
 
+    # When the folder already has a sharing link with a password, OneDrive shows
+    # "¿Quieres actualizar el vínculo?" with two options: use a new password or keep
+    # the existing one.  We always choose "Usar nueva contraseña" so that the password
+    # in the Excel report matches the actual link password.
+    try:
+        frame.wait_for_selector(
+            SHARE_SELECTORS["use_new_password_button"],
+            state="visible",
+            timeout=3_000,
+        )
+        frame.click(SHARE_SELECTORS["use_new_password_button"], timeout=ACTION_TIMEOUT_MS)
+        page.wait_for_timeout(400)
+        logger.debug("SHARE | dismissed 'update link?' dialog — chose new password")
+    except Exception:
+        pass  # dialog didn't appear — normal for first-time shares
 
-def _click_apply(page: "Page") -> None:  # type: ignore[name-defined]
-    """Click the Apply button inside shareFrame and wait for the iframe to close.
+
+def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
+    """Click Apply, capture the sharing URL from 'Copiar vínculo', then close the dialog.
+
+    After clicking Apply, OneDrive returns to the invite panel (the shareFrame iframe
+    stays open). The sharing URL is captured by injecting a clipboard interceptor into
+    the iframe before clicking "Copiar vínculo", then reading the intercepted value.
+    Falls back to a DOM scan if the interceptor misses. Both strategies are fail-open:
+    any exception returns None without raising.
 
     Args:
         page: Authenticated Playwright page.
+
+    Returns:
+        The OneDrive sharing URL (the one from "Copiar vínculo"), or None if capture fails.
 
     Raises:
         ShareError: If the Apply button cannot be clicked.
@@ -251,14 +332,90 @@ def _click_apply(page: "Page") -> None:  # type: ignore[name-defined]
     except Exception as exc:
         raise ShareError(f"Could not click apply button: {exc}") from exc
 
-    # Wait for the iframe itself to detach — more reliable than waiting for a
-    # button inside the frame to disappear (the frame may navigate or close).
+    # After clicking Apply, OneDrive may show "¿Quieres actualizar el vínculo?"
+    # when the link already has a password configured from a previous run.
+    # This dialog blocks the invite panel — it MUST be dismissed before the
+    # "Copiar vínculo" button becomes accessible.
     try:
+        frame.wait_for_selector(
+            SHARE_SELECTORS["use_new_password_button"],
+            state="visible",
+            timeout=4_000,
+        )
+        frame.click(SHARE_SELECTORS["use_new_password_button"], timeout=ACTION_TIMEOUT_MS)
+        page.wait_for_timeout(500)
+        logger.debug("SHARE | dismissed 'update link?' dialog after Apply")
+    except Exception:
+        pass  # dialog didn't appear — first-time share or no existing password
+
+    # Now the invite panel is (or will be) visible with "Copiar vínculo".
+    # The iframe is stable here — the Apply navigation (settings → invite panel) has
+    # already completed, so an injected interceptor will NOT be destroyed by navigation.
+    #
+    # Strategy: inject a writeText interceptor BEFORE clicking the copy button.
+    # Reading via navigator.clipboard.readText() is intentionally avoided — it triggers
+    # the browser's native "¿Quieres compartir el portapapeles?" permission dialog
+    # (Bloquear / Permitir) in headed mode, which blocks the automation.
+    share_url: "str | None" = None
+    try:
+        frame.wait_for_selector(
+            SHARE_SELECTORS["copy_link_button"],
+            state="visible",
+            timeout=ACTION_TIMEOUT_MS,
+        )
+
+        # Inject interceptor into the now-stable invite panel context.
+        frame.evaluate("""() => {
+            window.__capturedUrl = null;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                const _orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+                navigator.clipboard.writeText = function(text) {
+                    window.__capturedUrl = text;
+                    return _orig(text);
+                };
+            }
+            if (document.execCommand) {
+                const _origExec = document.execCommand.bind(document);
+                document.execCommand = function(cmd) {
+                    if (cmd === 'copy') {
+                        const sel = window.getSelection();
+                        if (sel && sel.toString()) window.__capturedUrl = sel.toString();
+                    }
+                    return _origExec.apply(document, arguments);
+                };
+            }
+        }""")
+
+        # Click "Copiar vínculo" — OneDrive calls writeText() → interceptor captures URL.
+        frame.click(SHARE_SELECTORS["copy_link_button"], timeout=ACTION_TIMEOUT_MS)
+        page.wait_for_timeout(500)
+
+        # Read captured URL — no clipboard.readText(), no browser permission prompt.
+        captured = frame.evaluate("() => window.__capturedUrl")
+        if captured and isinstance(captured, str) and captured.startswith("http"):
+            share_url = captured
+
+        # Fallback: scan iframe HTML for /:f:/ sharing URL pattern.
+        if not share_url:
+            share_url = _scan_iframe_for_share_url(frame)
+
+        if share_url:
+            logger.debug("SHARE | URL captured from invite panel after Apply")
+        else:
+            logger.debug("SHARE | URL capture failed — reporter will use fallback URL")
+    except Exception:
+        logger.debug("SHARE | copy-link URL capture failed — reporter will use fallback URL")
+
+    # Close the dialog by pressing Escape.
+    try:
+        page.keyboard.press("Escape")
         page.wait_for_selector(
             SHARE_SELECTORS["share_iframe"], state="detached", timeout=ACTION_TIMEOUT_MS
         )
     except Exception:
         logger.debug("SHARE | share iframe still present after apply — proceeding anyway")
+
+    return share_url
 
 
 # ---------------------------------------------------------------------------
@@ -313,17 +470,21 @@ def share_folder(
         # Open share dialog (retried)
         _open_share_dialog(page, leaf_name)
 
-        # Configure share settings (retried)
+        # Configure share settings (retried) — handles "¿Quieres actualizar?" dialog
         _apply_share_settings(page, password, expiry_str)
 
-        # Click Apply and wait for dialog close
-        _click_apply(page)
+        # Click Apply, capture URL from "Copiar vínculo" in the re-shown invite panel
+        # (after password and expiry are set), then close the dialog.
+        share_url = _click_apply(page)
+        if share_url:
+            stats.share_urls[key] = share_url
 
         stats.shared.append(key)
         logger.info(
-            "SHARE_OK | folder={folder} | expiry={expiry}",
+            "SHARE_OK | folder={folder} | expiry={expiry} | url_captured={captured}",
             folder=key,
             expiry=expiry_str,
+            captured=bool(share_url),
         )
 
     except ShareError as exc:

@@ -444,5 +444,70 @@ class TestBuildReportRowsPasswords(unittest.TestCase):
         self.assertEqual(rows[2]["password"], "pass_gamma")
 
 
+# ---------------------------------------------------------------------------
+# share_urls parameter: TestBuildReportRowsShareUrls
+# ---------------------------------------------------------------------------
+
+
+class TestBuildReportRowsShareUrls(unittest.TestCase):
+    """Tests for build_report_rows() share_urls= parameter."""
+
+    def _import(self):
+        from onedrive_rpa.rpa.reporter import build_report_rows
+        return build_report_rows
+
+    def test_share_url_used_when_provided(self):
+        """When share_urls has an entry for the folder, that URL is used for short_url/folder_url."""
+        build_report_rows = self._import()
+        share_url = "https://archacomco-my.sharepoint.com/:f:/r/personal/test/archivos_1?e=ABC"
+        rows = build_report_rows(
+            ["archivos_1"],
+            share_urls={"archivos_1": share_url},
+        )
+        # The folder_url must be the share URL, not the constructed path URL
+        self.assertEqual(rows[0]["folder_url"], share_url)
+
+    def test_fallback_to_constructed_url_when_no_share_url(self):
+        """When share_urls is None (default), folder_url must be the constructed path URL."""
+        from unittest import mock
+        build_report_rows = self._import()
+        with mock.patch("onedrive_rpa.config.ONEDRIVE_URL", "https://example.sharepoint.com"), \
+             mock.patch("onedrive_rpa.config.SHAREPOINT_PERSONAL_PATH", "/personal/user"):
+            rows = build_report_rows(["alpha"], source_folder="clientes")
+        self.assertIn("example.sharepoint.com", rows[0]["folder_url"])
+        self.assertIn("alpha", rows[0]["folder_url"])
+
+    def test_fallback_when_folder_not_in_share_urls(self):
+        """When share_urls exists but doesn't have the folder, constructed URL is used."""
+        from unittest import mock
+        build_report_rows = self._import()
+        with mock.patch("onedrive_rpa.config.ONEDRIVE_URL", "https://example.sharepoint.com"), \
+             mock.patch("onedrive_rpa.config.SHAREPOINT_PERSONAL_PATH", "/personal/user"):
+            rows = build_report_rows(
+                ["alpha"],
+                source_folder="clientes",
+                share_urls={"other_folder": "https://example.com/other"},
+            )
+        # alpha has no entry in share_urls → constructed URL must be used
+        self.assertIn("alpha", rows[0]["folder_url"])
+        self.assertIn("example.sharepoint.com", rows[0]["folder_url"])
+
+    def test_multiple_folders_partial_share_urls(self):
+        """Only folders with entries in share_urls use the sharing URL; others use constructed URL."""
+        from unittest import mock
+        build_report_rows = self._import()
+        share_url_alpha = "https://archacomco-my.sharepoint.com/:f:/r/personal/test/alpha?e=X"
+        with mock.patch("onedrive_rpa.config.ONEDRIVE_URL", "https://example.sharepoint.com"), \
+             mock.patch("onedrive_rpa.config.SHAREPOINT_PERSONAL_PATH", "/personal/user"):
+            rows = build_report_rows(
+                ["alpha", "beta"],
+                source_folder="clientes",
+                share_urls={"alpha": share_url_alpha},
+            )
+        self.assertEqual(rows[0]["folder_url"], share_url_alpha)
+        self.assertIn("beta", rows[1]["folder_url"])  # constructed URL
+        self.assertIn("example.sharepoint.com", rows[1]["folder_url"])
+
+
 if __name__ == "__main__":
     unittest.main()
