@@ -78,11 +78,11 @@ def run_all_checks() -> list:
 
     results: list[CheckResult] = []
 
-    results.append(CheckResult(
-        name="python3",
-        passed=shutil.which("python3") is not None,
-        hint=_HINTS["python3"],
-    ))
+    if _OS == "Windows":
+        py3_found = shutil.which("python") is not None or shutil.which("py") is not None
+    else:
+        py3_found = shutil.which("python3") is not None
+    results.append(CheckResult(name="python3", passed=py3_found, hint=_HINTS["python3"]))
 
     pip_rc = subprocess.run(
         [sys.executable, "-m", "pip", "--version"], capture_output=True

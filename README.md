@@ -4,6 +4,86 @@ Hub de automatización interna con interfaz de terminal (TUI). Centraliza herram
 
 ---
 
+## Requisitos previos
+
+- **Python 3.11 o superior** — [python.org/downloads](https://www.python.org/downloads/)
+- **Git** (para clonar) — [git-scm.com](https://git-scm.com)
+- Conexión a internet (para descargar Chromium ~150 MB la primera vez)
+
+> **Windows:** durante la instalación de Python, marcá la opción **"Add Python to PATH"**. Sin eso, los comandos `python` y `pip` no van a funcionar en la terminal.
+
+---
+
+## Instalación
+
+### Opción A — Instalador automático (recomendado)
+
+**macOS / Linux:**
+```bash
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+chmod +x install.sh
+./install.sh
+```
+
+**Windows (cmd o PowerShell como usuario normal):**
+```
+1. Clonar o descomprimir el repositorio
+2. Doble click en install.bat
+   — o desde cmd: install.bat
+3. Abrir una terminal NUEVA y ejecutar: nova
+```
+
+El instalador verifica Python 3.11+, instala `pipx` si falta, e instala `novahold` como comando global.
+
+> **Windows — PATH no actualizado:** si después de instalar `nova` no es reconocido como comando,
+> cerrá la terminal y abrí una nueva. Si persiste, reiniciá el equipo (Windows actualiza el PATH
+> del usuario recién al iniciar sesión).
+
+### Opción B — pipx (usuario técnico)
+
+```bash
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+pipx install .
+```
+
+### Opción C — desarrollo local (sin instalar globalmente)
+
+```bash
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+pip install -r requirements.txt
+```
+
+En Windows usá `python` en lugar de `python3`:
+```bat
+python -m pip install -r requirements.txt
+```
+
+Para ejecutar en modo desarrollo (sin instalar):
+
+- **macOS/Linux:** `./nova`
+- **Windows:** `python -m novahome`
+
+### Primer uso
+
+Después de instalar, ejecutá `nova`. La primera vez que entrés a **azulito**, el hub:
+1. Verifica automáticamente si Playwright y Chromium están instalados — y ofrece instalarlos si falta algo.
+2. Ofrece configurar las credenciales de OneDrive (`.env`) mediante un wizard interactivo.
+
+No es necesario correr comandos adicionales.
+
+---
+
+## Ejecutar
+
+```bash
+nova
+```
+
+---
+
 ## Estructura del repositorio
 
 ```
@@ -37,62 +117,6 @@ CONTROL-epa/
     ├── folders.json            ← carpetas a limpiar + config del reporte
     └── .env                    ← credenciales (no commitear, solo en desarrollo)
 ```
-
----
-
-## Instalación
-
-### Opción A — Instalador automático (recomendado)
-
-**macOS / Linux:**
-```bash
-git clone https://github.com/alberto8812/CONTROL-epa.git
-cd CONTROL-epa
-./install.sh
-```
-
-**Windows:**
-```
-1. Clonar o descomprimir el repositorio
-2. Doble click en install.bat
-3. Abrir una terminal nueva
-```
-
-El instalador verifica Python 3.11+, instala pipx si falta, e instala `novahold` como comando global.
-
-### Opción B — pipx (usuario técnico)
-
-```bash
-git clone https://github.com/alberto8812/CONTROL-epa.git
-cd CONTROL-epa
-pipx install .
-```
-
-### Opción C — desarrollo local
-
-```bash
-git clone https://github.com/alberto8812/CONTROL-epa.git
-cd CONTROL-epa
-pip install -r requirements.txt
-```
-
-### Primer uso
-
-Después de instalar, ejecutá `nova`. La primera vez que entrés a **azulito**, el hub:
-1. Verifica automáticamente si Playwright y Chromium están instalados — y ofrece instalarlos si falta algo.
-2. Ofrece configurar las credenciales de OneDrive (`.env`) mediante un wizard interactivo.
-
-No es necesario correr comandos adicionales.
-
----
-
-## Ejecutar
-
-```bash
-nova
-```
-
-> **En desarrollo (sin instalar):** `./nova` desde la raíz del repositorio.
 
 ---
 
@@ -152,7 +176,7 @@ Se ejecutan **5 verificaciones de dependencias** antes de iniciar:
 
 | Check | Qué verifica |
 |-------|-------------|
-| python3 | `shutil.which("python3")` — intérprete disponible |
+| python3 | intérprete disponible (`python3` en macOS/Linux, `python` o `py` en Windows) |
 | pip | `python -m pip --version` — gestor de paquetes |
 | playwright | `import playwright` — paquete instalado |
 | chromium | `playwright install --dry-run chromium` — browser descargado |
@@ -171,7 +195,8 @@ Se ejecutan **5 verificaciones de dependencias** antes de iniciar:
 
 ```
   Hay dependencias faltantes. ¿Qué querés hacer?
-  › Configurar variables de entorno
+  › Instalar dependencias faltantes
+    Configurar variables de entorno
     Volver
 ```
 
@@ -191,14 +216,8 @@ Wizard interactivo que lee el `.env` actual y permite actualizar las 3 variables
 
 #### Opción: Iniciar
 
-Lanza el RPA como proceso hijo:
-
-```bash
-python3 onedrive_rpa/main.py --mode manual
-```
-
-El proceso RPA:
-1. Abre Chromium con Playwright (headless o visible según configuración)
+Lanza el RPA como proceso hijo. El proceso RPA:
+1. Abre Chromium con Playwright
 2. Autentica con las credenciales del `.env`
 3. Navega recursivamente por las carpetas configuradas en `folders.json`
 4. Elimina todos los archivos (mantiene la estructura de carpetas)
@@ -299,3 +318,5 @@ En ambos casos podés usar el wizard desde el hub: `nova → azulito → Configu
 | loguru | 0.7.2 | Logging con rotación |
 | python-dotenv | 1.0.1 | Lectura del `.env` |
 | openpyxl | 3.1.2 | Generación de reportes Excel |
+| cryptography | >=42.0.0 | Encriptación de URLs en el reporte |
+| certifi | >=2024.0.0 | Certificados SSL actualizados |
