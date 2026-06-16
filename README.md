@@ -34,7 +34,7 @@ chmod +x install.sh
 3. Abrir una terminal NUEVA y ejecutar: nova
 ```
 
-El instalador verifica Python 3.11+, instala `pipx` si falta, e instala `novahold` como comando global.
+El instalador verifica Python 3.11+, instala `pipx` si falta, instala `novahold` como comando global, e instala Chromium automáticamente (~150 MB — puede tardar unos minutos).
 
 > **Windows — PATH no actualizado:** si después de instalar `nova` no es reconocido como comando,
 > cerrá la terminal y abrí una nueva. Si persiste, reiniciá el equipo (Windows actualiza el PATH

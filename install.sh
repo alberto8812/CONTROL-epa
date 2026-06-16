@@ -40,6 +40,18 @@ echo "  Instalando novahold..."
 pipx install "$SCRIPT_DIR" --force --quiet
 echo -e "${GREEN}✓  novahold instalado${NC}"
 
+# 4. Install Chromium (Playwright browser)
+echo "  Instalando Chromium (puede tardar unos minutos)..."
+PIPX_HOME="${PIPX_HOME:-$HOME/.local/pipx}"
+PLAYWRIGHT_BIN="$PIPX_HOME/venvs/novahold/bin/playwright"
+if [ -f "$PLAYWRIGHT_BIN" ]; then
+    "$PLAYWRIGHT_BIN" install chromium
+    echo -e "${GREEN}✓  Chromium listo${NC}"
+else
+    echo -e "${YELLOW}⚠  No se encontró playwright en el venv.${NC}"
+    echo "   Ejecutá manualmente: playwright install chromium"
+fi
+
 echo ""
 echo -e "${GREEN}  ¡Instalación completa!${NC}"
 echo ""

@@ -63,6 +63,19 @@ if errorlevel 1 (
 )
 echo [OK] novahold instalado
 
+REM 5. Install Chromium (Playwright browser)
+echo   Instalando Chromium (puede tardar unos minutos)...
+set PIPX_HOME=%USERPROFILE%\.local\pipx
+if not defined PIPX_HOME_ENV set PIPX_HOME_ENV=%PIPX_HOME%
+set PLAYWRIGHT_BIN=%PIPX_HOME%\venvs\novahold\Scripts\playwright.exe
+if exist "%PLAYWRIGHT_BIN%" (
+    "%PLAYWRIGHT_BIN%" install chromium
+    echo [OK] Chromium listo
+) else (
+    echo [AVISO] No se encontro playwright en el venv.
+    echo         Ejecuta manualmente: playwright install chromium
+)
+
 echo.
 echo   Instalacion completa!
 echo.

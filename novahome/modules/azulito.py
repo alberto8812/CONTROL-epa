@@ -165,10 +165,13 @@ def run() -> None:
     while True:
         choice = questionary.select(
             "azulito — OneDrive RPA:",
-            choices=["Eliminar archivos OneDrive", "Volver"],
+            choices=["Eliminar archivos OneDrive", "Gestionar carpetas", "Volver"],
         ).ask()
 
         if choice is None or choice == "Volver":
             return
         if choice == "Eliminar archivos OneDrive":
             _eliminar_flow()
+        elif choice == "Gestionar carpetas":
+            from novahome.modules import folder_manager
+            folder_manager.run()

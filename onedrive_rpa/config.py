@@ -35,11 +35,18 @@ load_dotenv(BASE_DIR / ".env")
 # URLs
 # ---------------------------------------------------------------------------
 
-ONEDRIVE_URL: str = "https://archacomco-my.sharepoint.com"
-"""URL raíz del tenant de SharePoint/OneDrive for Business."""
+ONEDRIVE_URL: str = os.getenv("ONEDRIVE_URL", "").rstrip("/")
+"""URL raíz del tenant de SharePoint/OneDrive for Business. Cargar desde .env."""
 
-ONEDRIVE_LOGIN_URL: str = "https://archacomco-my.sharepoint.com"
+ONEDRIVE_LOGIN_URL: str = ONEDRIVE_URL
 """URL de entrada al tenant. SharePoint redirige al login de Microsoft automáticamente."""
+
+if not ONEDRIVE_URL:
+    raise ValueError(
+        "ONEDRIVE_URL is not set. "
+        "Add it to your .env file, e.g.: "
+        "ONEDRIVE_URL=https://mytenant-my.sharepoint.com"
+    )
 
 # ---------------------------------------------------------------------------
 # Paths

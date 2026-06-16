@@ -19,6 +19,7 @@ def _resolve_data_dir() -> Path:
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]  # backward-compat alias
 _DATA_DIR: Path = _resolve_data_dir()
+DATA_DIR: Path = _DATA_DIR  # public alias — use this in new modules
 ENV_PATH: Path = _DATA_DIR / ".env"
 _OS: str = platform.system()  # "Darwin", "Linux", "Windows"
 

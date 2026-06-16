@@ -1,14 +1,47 @@
 {
   "clean": [
     {
-      "path": "pruebas/archivos_1"
+      "path": "Camion/ADMIN/Bz2rr"
     },
     {
-      "path": "pruebas/archivos_2"
+      "path": "Camion/Administrativo1/Bz5bb"
+    },
+    {
+      "path": "Camion/ADMIN/Bz7tt"
+    },
+    {
+      "path": "Camion/Plano/Bz8yy"
+    },
+    {
+      "path": "Camion/ADMIN/Bz12mm"
+    },
+    {
+      "path": "Camion/ADMIN/Bz13ff"
+    },
+    {
+      "path": "Camion/Administrativo1/Bz17uu"
+    },
+    {
+      "path": "Camion/Plano/Bz21jj"
+    },
+    {
+      "path": "Camion/Plano/Bz22ss"
+    },
+    {
+      "path": "Camion/Administrativo1/BZ23ii"
+    },
+    {
+      "path": "Camion/ADMIN/BZ24kk"
+    },
+    {
+      "path": "Camion/ADMIN/Bz27km"
+    },
+    {
+      "path": "Camion/ADMIN/Bz29aa"
     }
   ],
   "report": {
-    "source_folder": "pruebas",
-    "destination_folder": "pruebas/registro"
+    "source_folder": "Camion",
+    "destination_folder": "Tecnología"
   }
 }
