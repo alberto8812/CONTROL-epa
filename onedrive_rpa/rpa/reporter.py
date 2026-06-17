@@ -110,6 +110,18 @@ def _build_folder_url(source_folder: str, name: str) -> str:
     return base + "/" + "/".join(encoded_segments)
 
 
+def _build_folder_url_from_path(full_path: str) -> str:
+    """Like _build_folder_url but accepts a single pre-assembled relative path."""
+    base = config.ONEDRIVE_URL.rstrip("/")
+    segments = [config.SHAREPOINT_PERSONAL_PATH, "Documents", full_path]
+    encoded_segments = [
+        urllib.parse.quote(seg.strip("/"), safe="/")
+        for seg in segments
+        if seg.strip("/")
+    ]
+    return base + "/" + "/".join(encoded_segments)
+
+
 def _shorten_url(long_url: str) -> str:
     """Call the configured URL shortener API and return the short URL.
 
@@ -214,6 +226,8 @@ def build_report_rows(
     fernet=None,
     passwords: dict[str, str] | None = None,
     share_urls: dict[str, str] | None = None,
+    full_paths: list[str] | None = None,
+    expiry_date: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """
     Build the list of report row dicts from a list of folder names.
@@ -231,7 +245,8 @@ def build_report_rows(
         now: Optional datetime to stamp as the creation date. Defaults to
              datetime.now(). Injecting a fixed value makes tests deterministic.
         source_folder: Parent folder path relative to Documents (e.g.
-                       ``"clientes"``). Used to build the per-row OneDrive URL.
+                       ``"clientes"``). Used to build the per-row OneDrive URL
+                       when ``full_paths`` is not provided.
         fernet: Optional :class:`~cryptography.fernet.Fernet` instance for
                 encryption.  When ``None``, falls back to ``config.FERNET``.
                 Injecting a value here makes tests independent of the
@@ -247,6 +262,11 @@ def build_report_rows(
                     path-based URL built by ``_build_folder_url()``.  When
                     ``None`` or a folder has no entry, falls back to the
                     constructed URL (backward compatible, fail-open).
+        full_paths: Optional list of full folder paths parallel to
+                    ``folder_names`` (e.g. ``["Camion/Plano/Bz8yy", ...]``).
+                    When provided, the fallback URL is built from the full path
+                    instead of ``source_folder + name``, so the URL points to
+                    the specific leaf folder rather than the container.
 
     Returns:
         A list of dicts, one per folder name.
@@ -254,10 +274,14 @@ def build_report_rows(
     creation_date = now or datetime.now()
     active_fernet = fernet if fernet is not None else config.FERNET
     rows = []
-    for name in folder_names:
+    for i, name in enumerate(folder_names):
         # Use the real OneDrive sharing URL when available (captured from
         # "Copiar vínculo" after sharing); fall back to the constructed path URL.
-        url = (share_urls.get(name) if share_urls else None) or _build_folder_url(source_folder, name)
+        full_path = full_paths[i] if full_paths and i < len(full_paths) else None
+        url = (share_urls.get(name) if share_urls else None) or (
+            _build_folder_url_from_path(full_path) if full_path
+            else _build_folder_url(source_folder, name)
+        )
         # Short URL via configured provider (fail-open: falls back to full URL)
         short_url = _shorten_url(url)
         # Fernet token kept for auditability — lets you recover the original URL
@@ -276,6 +300,7 @@ def build_report_rows(
                 "encrypted_url": encrypted_url,
                 "folder_url": url,
                 "creation_date": creation_date,
+                "expiry_date": expiry_date,
             }
         )
     return rows
@@ -309,7 +334,7 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
     ws = wb.active
     ws.title = "Report"
 
-    headers = ["Folder Name", "Password", "URL", "Creation Date"]
+    headers = ["Folder Name", "Password", "URL", "Creation Date", "Expiry Date"]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -321,6 +346,7 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
             row["password"],
             short_url,
             row["creation_date"],
+            row.get("expiry_date"),
         ])
         # The short URL is both the display text AND the hyperlink target —
         # copy-pasting it works, clicking it works, and no SharePoint path is visible.
@@ -548,6 +574,8 @@ def run_report(
     callbacks=None,
     passwords: dict[str, str] | None = None,
     share_urls: dict[str, str] | None = None,
+    folder_paths: list[str] | None = None,
+    expiry_date: "datetime | None" = None,
 ) -> ReportStats:
     """Orchestrate collect → build rows → write Excel → upload.
 
@@ -556,7 +584,9 @@ def run_report(
 
     Args:
         page: Authenticated Playwright page.
-        source_folder: Folder to enumerate immediate subfolders from.
+        source_folder: Folder to enumerate immediate subfolders from (used when
+                       ``folder_paths`` is not provided). Also used to navigate
+                       to the destination for upload.
         destination_folder: Folder where the Excel report is uploaded.
         callbacks: Optional RPACallbacks-compatible object. Calls are guarded
                    with hasattr so any subset of callbacks is acceptable.
@@ -565,6 +595,13 @@ def run_report(
                    ensures the password in the report matches the one set on the
                    sharing link.  When ``None``, each row generates a fresh
                    password (backward compatible).
+        folder_paths: Optional list of full folder paths from the ``clean`` list
+                      (e.g. ``["Camion/Plano/Bz8yy", "Camion/ADMIN/Bz2rr"]``).
+                      When provided, the report rows are derived directly from
+                      these paths (leaf name as display name, full path for URL
+                      construction) instead of enumerating ``source_folder`` via
+                      the DOM. This ensures the report shows the same specific
+                      folders that were cleaned and shared.
 
     Returns:
         ReportStats with counts, filename, and any errors encountered.
@@ -575,7 +612,16 @@ def run_report(
         if callbacks and hasattr(callbacks, "on_report_start"):
             callbacks.on_report_start(source_folder, destination_folder)
 
-        subfolders = collect_subfolders(page, source_folder)
+        if folder_paths:
+            # Derive rows directly from the clean paths — leaf name as display
+            # name, full path for URL construction. Avoids DOM navigation and
+            # ensures report rows match exactly what was cleaned and shared.
+            leaf_names = [fp.rstrip("/").rsplit("/", 1)[-1] for fp in folder_paths]
+            subfolders = leaf_names
+            full_paths_for_rows: list[str] | None = folder_paths
+        else:
+            subfolders = collect_subfolders(page, source_folder)
+            full_paths_for_rows = None
 
         # Exclude the destination folder itself from the report when it lives
         # directly inside source_folder (e.g. source="pruebas", dest="pruebas/registro"
@@ -583,7 +629,16 @@ def run_report(
         source_prefix = source_folder.rstrip("/") + "/"
         if destination_folder.startswith(source_prefix):
             dest_child = destination_folder[len(source_prefix):].split("/")[0]
-            subfolders = [f for f in subfolders if f != dest_child]
+            if full_paths_for_rows:
+                pairs = [
+                    (n, p) for n, p in zip(subfolders, full_paths_for_rows)
+                    if n != dest_child
+                ]
+                subfolders, full_paths_for_rows = (
+                    [n for n, _ in pairs], [p for _, p in pairs]
+                )
+            else:
+                subfolders = [f for f in subfolders if f != dest_child]
 
         stats.subfolders_found = len(subfolders)
 
@@ -593,6 +648,7 @@ def run_report(
         rows = build_report_rows(
             subfolders, source_folder=source_folder, fernet=config.FERNET,
             passwords=passwords, share_urls=share_urls,
+            full_paths=full_paths_for_rows, expiry_date=expiry_date,
         )
         stats.rows_generated = len(rows)
 

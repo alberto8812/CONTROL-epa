@@ -271,14 +271,30 @@ def _apply_share_settings(page: "Page", password: str, expiry_str: str) -> None:
     # string char-by-char via keyboard events. Fluent UI DatePicker processes
     # keydown events even on readonly inputs to update its internal state.
     # Press Tab to confirm and close any popup before moving on.
+    # Retry once if the input value does not reflect the typed date afterwards.
     try:
         expiry_input = frame.locator(SHARE_SELECTORS["expiry_input"]).first
         expiry_input.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-        expiry_input.click(timeout=ACTION_TIMEOUT_MS)
-        page.wait_for_timeout(400)  # let calendar popup render if it opens
-        page.keyboard.type(expiry_str)  # "DD/MM/YYYY"
-        page.keyboard.press("Tab")      # confirm selection and close popup
-        page.wait_for_timeout(300)
+
+        for attempt in range(2):
+            expiry_input.click(timeout=ACTION_TIMEOUT_MS)
+            page.wait_for_timeout(600)  # calendar popup needs time to render
+            page.keyboard.type(expiry_str)  # "DD/MM/YYYY"
+            page.keyboard.press("Tab")      # confirm selection and close popup
+            page.wait_for_timeout(500)
+
+            # Verify the date was accepted — read back the input value.
+            try:
+                actual = expiry_input.get_attribute("value", timeout=2_000) or ""
+            except Exception:
+                actual = ""
+            if expiry_str in actual or actual.strip():
+                break  # date landed — stop retrying
+            if attempt == 0:
+                logger.debug(
+                    "SHARE | expiry date may not have landed (got {v!r}), retrying",
+                    v=actual,
+                )
     except Exception as exc:
         raise ShareError(f"Could not set expiry date {expiry_str!r}: {exc}") from exc
 
@@ -388,7 +404,17 @@ def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
 
         # Click "Copiar vínculo" — OneDrive calls writeText() → interceptor captures URL.
         frame.click(SHARE_SELECTORS["copy_link_button"], timeout=ACTION_TIMEOUT_MS)
-        page.wait_for_timeout(500)
+
+        # Wait dynamically until the interceptor captures the URL (up to 5s).
+        # A fixed 500ms sleep misses on slow connections — the writeText() call
+        # may not have fired yet when we read __capturedUrl.
+        try:
+            frame.wait_for_function(
+                "() => window.__capturedUrl !== null",
+                timeout=5_000,
+            )
+        except Exception:
+            pass  # timed out — read whatever's there, then fall back to DOM scan
 
         # Read captured URL — no clipboard.readText(), no browser permission prompt.
         captured = frame.evaluate("() => window.__capturedUrl")

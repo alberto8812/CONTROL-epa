@@ -272,6 +272,8 @@ def main(
                     callbacks=display.callbacks,
                     passwords=share_passwords,
                     share_urls=global_share_stats.share_urls,
+                    folder_paths=folder_paths,
+                    expiry_date=share_expiry,
                 )
             elif folders_config.report is not None and dry_run:
                 logger.info("REPORT | SKIPPED | reason=dry_run")

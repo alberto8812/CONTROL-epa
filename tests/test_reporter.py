@@ -171,7 +171,7 @@ class TestWriteExcelEncryptedUrl(unittest.TestCase):
         wb = openpyxl.load_workbook(result)
         ws = wb.active
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        self.assertEqual(headers, ["Folder Name", "Password", "URL", "Creation Date"])
+        self.assertEqual(headers, ["Folder Name", "Password", "URL", "Creation Date", "Expiry Date"])
 
     def test_write_excel_encrypted_url_in_data_row_column_3(self):
         """Short URL (or fallback) must appear in column index 2 (3rd column, zero-based)."""
