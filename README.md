@@ -232,6 +232,7 @@ El exit code del RPA se propaga al hub:
 | 1 | Error de configuración (`folders.json` inválido) |
 | 2 | `session.json` ausente en modo `--mode auto` |
 | 3 | Sesión expiró durante la ejecución |
+| 4 | Una o más carpetas no quedaron completamente vacías |
 | 130 | `Ctrl+C` |
 
 ---

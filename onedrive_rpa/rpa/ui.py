@@ -60,11 +60,13 @@ _EVENTS: dict[str, tuple[str, str]] = {
     "NAV":    ("▸", _C_NAV),
     "SCAN":   ("⊡", _C_NAV),
     "DELETE": ("✕", _C_SUCCESS),
+    "RMDIR":  ("⌫", _C_SUCCESS),
     "DRY":    ("◌", _C_DRY),
     "DONE":   ("✓", _C_SUCCESS),
     "ERROR":  ("✗", _C_ERROR),
     "WARN":   ("▲", _C_WARN),
     "INFO":   ("·", _C_DIM),
+    "PARTIAL": ("▲", _C_WARN),
     "REPORT": ("▣", "bold cyan"),
     "UPLOAD": ("↑", "bold blue"),
     "SHARE":  ("⚿", "bold green3"),
@@ -80,7 +82,9 @@ class RPACallbacks:
     on_folder_done:       Callable[[str, int, int], None] = field(default=lambda *_: None)
     on_file_deleted:      Callable[[str], None]           = field(default=lambda *_: None)
     on_file_would_delete: Callable[[str], None]           = field(default=lambda *_: None)
+    on_folder_deleted:    Callable[[str], None]           = field(default=lambda *_: None)
     on_error:             Callable[[str, str], None]      = field(default=lambda *_: None)
+    on_folder_incomplete: Callable[[str, int], None]      = field(default=lambda *_: None)
     on_tick:              Callable[[], None]              = field(default=lambda: None)
     # Report callbacks (PR 3)
     on_report_start:      Callable[[str, str], None]      = field(default=lambda *_: None)
@@ -103,6 +107,7 @@ class RPADisplay:
         self._deleted        = 0
         self._would_delete   = 0
         self._errors         = 0
+        self._incomplete     = 0
         self._folders_done   = 0
         self._current_folder = ""
         self._current_file   = ""
@@ -154,7 +159,9 @@ class RPADisplay:
             on_folder_done=self._on_folder_done,
             on_file_deleted=self._on_file_deleted,
             on_file_would_delete=self._on_file_would_delete,
+            on_folder_deleted=self._on_folder_deleted,
             on_error=self._on_error,
+            on_folder_incomplete=self._on_folder_incomplete,
             on_tick=self._refresh,
             on_report_start=self._on_report_start,
             on_report_subfolders=self._on_report_subfolders,
@@ -197,6 +204,10 @@ class RPADisplay:
             self._progress.advance(task_id)
         self._emit("DELETE", path)
 
+    def _on_folder_deleted(self, path: str) -> None:
+        self._current_file = path.split("/")[-1]
+        self._emit("RMDIR", path)
+
     def _on_file_would_delete(self, path: str) -> None:
         self._would_delete += 1
         self._current_file = path.split("/")[-1]
@@ -208,6 +219,10 @@ class RPADisplay:
     def _on_error(self, path: str, reason: str) -> None:
         self._errors += 1
         self._emit("ERROR", f"{path}  ·  {reason[:60]}")
+
+    def _on_folder_incomplete(self, folder_path: str, remaining: int) -> None:
+        self._incomplete += 1
+        self._emit("PARTIAL", f"{folder_path}  ·  {remaining} archivo(s) NO eliminados")
 
     def _on_report_start(self, source: str, destination: str) -> None:
         self._emit("REPORT", f"Generating report  ·  source={source}  →  dest={destination}")
@@ -399,6 +414,7 @@ class RPADisplay:
             [
                 stat_card(str(action_count),                            action_label,  action_color),
                 stat_card(str(self._errors),                            "ERRORS",      _C_ERROR if self._errors else _C_DIM),
+                stat_card(str(self._incomplete),                        "PARTIAL",     _C_WARN if self._incomplete else _C_DIM),
                 stat_card(f"{self._folders_done}/{len(self._folders)}", "FOLDERS",     _C_PRIMARY),
                 stat_card(elapsed_str,                                  "ELAPSED",     _C_DIM),
             ],
@@ -451,6 +467,7 @@ class RPADisplay:
         table.add_column(style="bold white")
         table.add_row(action_label, f"[{action_color}]{action_count}[/]")
         table.add_row("ERRORS",     f"[{_C_ERROR if self._errors else _C_DIM}]{self._errors}[/]")
+        table.add_row("PARTIAL",    f"[{_C_WARN if self._incomplete else _C_DIM}]{self._incomplete}[/]")
         table.add_row("FOLDERS",    f"[{_C_PRIMARY}]{self._folders_done}/{len(self._folders)}[/]")
         table.add_row("ELAPSED",    f"[{_C_DIM}]{hours:02d}:{m:02d}:{s:02d}[/]")
 

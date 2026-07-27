@@ -111,6 +111,60 @@ RETRY_BACKOFF_SEC: float = 2.0
 """Backoff base en segundos. Cada intento espera backoff * 2^(intento-1)."""
 
 # ---------------------------------------------------------------------------
+# Listado exhaustivo (anti-virtualización) — ver ADR sobre borrado incompleto
+# ---------------------------------------------------------------------------
+
+LIST_SCROLL_MAX_PASSES: int = 30
+"""Cota dura de intentos de scroll/nudge dentro de _scroll_until_stable().
+Evita loop infinito si el conteo de filas nunca se estabiliza."""
+
+LIST_SCROLL_SETTLE_MS: int = 600
+"""Milisegundos de espera tras cada nudge de scroll antes de re-contar filas."""
+
+LIST_SCROLL_STABLE_READS: int = 2
+"""Número de lecturas consecutivas con el mismo conteo de filas para considerar
+la lista completamente cargada (estable)."""
+
+LIST_SCROLL_BUDGET_MS: int = 60_000
+"""Presupuesto máximo de tiempo (pared) para _scroll_until_stable(), independiente
+de LIST_SCROLL_MAX_PASSES. Cualquiera de los dos límites que se alcance primero
+corta el loop y logea un WARNING."""
+
+MAX_EMPTY_VERIFY_PASSES: int = 4
+"""Número máximo de ciclos listar→seleccionar-todo→borrar→re-listar en
+_process_items() antes de marcar una carpeta como 'incomplete'. Deliberadamente
+NO reusa MAX_RETRIES: ese es semánticamente para reintentos por excepción,
+este es para reintentos por estado (la carpeta sigue teniendo archivos)."""
+
+EMPTY_VERIFY_SETTLE_MS: int = 1_500
+"""Milisegundos de espera FIJA (piso) tras disparar el borrado bulk, antes de
+empezar a sondear (ver EMPTY_VERIFY_POLL_INTERVAL_MS). 1.5s alcanza para
+borrados pequeños; se mantiene como piso — nunca se re-lista antes de este
+tiempo — pero un borrado de 100+ archivos puede tardar más en completarse
+server-side, de ahí el sondeo adicional en vez de subir este valor a un
+fijo más largo (que penalizaría también las carpetas con pocos archivos)."""
+
+EMPTY_VERIFY_POLL_INTERVAL_MS: int = 750
+"""Milisegundos entre sondeos sucesivos del conteo de filas, una vez pasado
+el piso de EMPTY_VERIFY_SETTLE_MS. Cada sondeo compara el conteo de filas
+contra el sondeo anterior; si no cambió, se asume que el borrado terminó
+de propagarse server-side y se corta el sondeo temprano."""
+
+EMPTY_VERIFY_MAX_SETTLE_MS: int = 90_000
+"""Presupuesto máximo (pared, adicional al piso EMPTY_VERIFY_SETTLE_MS) para
+el sondeo de estabilización post-borrado-bulk. Validado contra una carpeta
+real de 103 archivos (camion_2/ADMIN/Bz13ff): un valor de 8s era demasiado
+corto — OneDrive sigue borrando server-side bastante después de que el DOM
+deja de reflejar cambios visibles en los primeros segundos, y el loop de
+verificación reintentaba seleccionar-todo+borrar sobre una lista que en
+realidad seguía vaciándose sola, causando timeouts espurios en el toolbar
+y una carpeta marcada 'incomplete' cuando en la realidad terminó vacía unos
+minutos después. Si el conteo de filas sigue cambiando pasado este tiempo,
+se corta igual y se procede a re-listar — la verificación real de qué
+quedó pendiente la hace el loop de
+verificar-y-rehacer en cleaner.py (_process_items), no este sondeo."""
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
@@ -255,6 +309,12 @@ SELECTORS: dict[str, str] = {
     # El input tiene un <span> que intercepta clicks; hacer click en el div padre funciona.
     "select_all": "[data-automationid='row-selection-header']",
 
+    # Checkbox de selección de UNA fila individual (no el header select-all).
+    # Mismo patrón verificado en sharer.py (SHARE_SELECTORS['row_checkbox']):
+    # escopeado a un Locator de fila ya resuelto, así el prefijo compartido con
+    # 'row-selection-header' nunca genera match ambiguo (el header vive en thead).
+    "row_checkbox": "[data-automationid^='row-selection']",
+
     # Botón/item "Eliminar" — cubre toolbar directo y dropdown de overflow.
     "toolbar_delete": (
         "button[title='Eliminar'], button[title='Delete'], "
@@ -308,6 +368,32 @@ SELECTORS: dict[str, str] = {
 SHARE_EXPIRY_DAYS: int = 9
 """Number of days from today until the sharing link expires."""
 
+SHARE_HOLIDAY_COUNTRY: str = os.getenv("SHARE_HOLIDAY_COUNTRY", "CO")
+"""País (código ISO) usado para consultar festivos vía la librería `holidays`.
+Default Colombia (CO). Configurable por .env sin tocar código."""
+
+SHARE_HOLIDAY_EXTENSION_DAYS: int = 1
+"""Días extra a sumar al vencimiento si el período cruza al menos un festivo.
+Extensión plana y única (no recursiva) — ver docstring de adjust_expiry_for_holidays."""
+
+SHARE_CALENDAR_MAX_MONTH_STEPS: int = 24
+"""Cota dura al loop de navegación de meses del calendario de vencimiento en
+_set_expiry_date() (rpa/sharer.py) — evita un loop infinito si el header
+nunca avanza (p.ej. flecha deshabilitada)."""
+
+SHARE_MONTH_NAMES: dict[str, int] = {
+    # Español
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+    # English
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10,
+    "november": 11, "december": 12,
+}
+"""Mapa nombre de mes (minúsculas, ES+EN) -> número 1-12, por si cambia el
+idioma del tenant. Usado por _parse_month_year() en rpa/sharer.py."""
+
 SHARE_SELECTORS: dict[str, str] = {
     # Toolbar share button — "Compartir" / "Share"
     "share_button": (
@@ -324,13 +410,32 @@ SHARE_SELECTORS: dict[str, str] = {
         "[role='radio'][aria-label*='Cualquier persona']"
     ),
     # Expiry date input — DOM-confirmed: aria-label='Establecer fecha de expiración'
-    # IMPORTANT: readonly='' — .fill()/.clear() do NOT work.
-    # Must use click + page.keyboard.type() to set the date.
+    # IMPORTANT: readonly='' — .fill()/.clear() do NOT work and typed keystrokes
+    # are swallowed by the calendar popup. Setting the date requires real
+    # calendar-click navigation (see _set_expiry_date in sharer.py): click to
+    # open the calendar callout, navigate month-by-month via the header/arrow
+    # buttons, then click the target day cell.
+    # NOTE: the input's `id` (e.g. #datePicker-input16) is NOT stable across
+    # page loads — do not add a #datePicker-inputNN fallback here.
     "expiry_input": (
         "input[aria-label='Establecer fecha de expiración'], "
-        "input[placeholder*='DD/MM/YYYY'], "
-        "#datePicker-input20"
+        "input[placeholder*='DD/MM/YYYY']"
     ),
+    # Calendar callout month/year header — DOM-confirmed:
+    # <div class="fui-CalendarDay__monthAndYear ...">Julio 2026</div>
+    # Fallback to the grid's own aria-label (e.g. "Julio 2026, , ") for
+    # defense-in-depth in case the header class ever changes.
+    "expiry_month_year_label": (
+        ".fui-CalendarDay__monthAndYear, "
+        "[role='grid'][aria-label]"
+    ),
+    # Month navigation arrows inside the calendar callout — DOM-confirmed:
+    # two elements with class 'fui-CalendarDay__headerIconButton' (plus extra
+    # hashed atomic classes), no aria-label on either. DOM order is
+    # [prev/back, next/forward] (standard Fluent LTR convention). Calling code
+    # must use .nth(0) for prev and .nth(1) for next — they cannot be
+    # distinguished by selector alone.
+    "expiry_month_nav_buttons": ".fui-CalendarDay__headerIconButton",
     # Password input — DOM-confirmed: data-automationid='share_link_password'
     "password_input": (
         "[data-automationid='share_link_password'], "

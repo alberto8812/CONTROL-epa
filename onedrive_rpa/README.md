@@ -139,6 +139,7 @@ python main.py --mode manual --relogin
 | `1` | Error de configuración (`folders.json` inválido) |
 | `2` | Sesión faltante en modo `auto` |
 | `3` | Sesión expirada durante la ejecución |
+| `4` | Una o más carpetas no quedaron completamente vacías |
 | `130` | Interrumpido con Ctrl+C |
 
 ---

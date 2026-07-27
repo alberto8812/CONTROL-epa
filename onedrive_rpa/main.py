@@ -22,6 +22,8 @@ Exit codes:
     1  → error de configuración (folders.json inválido, etc.)
     2  → sesión faltante en modo auto (SessionMissingError)
     3  → sesión expirada mid-run (SessionExpiredError)
+    4  → corrida completa sin error fatal, pero una o más carpetas no
+         quedaron completamente vacías (CleanStats.incomplete no vacío)
     130 → KeyboardInterrupt (Ctrl+C)
 """
 
@@ -50,6 +52,7 @@ from onedrive_rpa.rpa.cleaner import FolderCleaner, CleanStats, FolderNotFoundEr
 from onedrive_rpa.rpa.logger import configure_logging
 from onedrive_rpa.rpa.reporter import generate_password
 from onedrive_rpa.rpa.sharer import share_folder, ShareStats, folder_key
+from onedrive_rpa.rpa._dates import adjust_expiry_for_holidays
 from onedrive_rpa.rpa.ui import RPADisplay
 
 
@@ -134,7 +137,9 @@ def main(
     RPA de limpieza de carpetas OneDrive via Playwright.
 
     Borra todos los archivos de las carpetas listadas en folders.json
-    de forma recursiva (DFS). Los subdirectorios NO se eliminan.
+    de forma recursiva (DFS). Las carpetas listadas en folders.json NUNCA se
+    eliminan, pero cualquier subcarpeta anidada dentro de ellas que quede
+    vacía tras el borrado SÍ se elimina.
     """
     # Configurar logging antes de cualquier operación
     configure_logging()
@@ -186,7 +191,15 @@ def main(
         folder_key(fp): generate_password()
         for fp in folder_paths
     }
-    share_expiry: datetime = datetime.now() + timedelta(days=config.SHARE_EXPIRY_DAYS)
+    _now: datetime = datetime.now()
+    _base_expiry: datetime = _now + timedelta(days=config.SHARE_EXPIRY_DAYS)
+    share_expiry: datetime = adjust_expiry_for_holidays(_now, _base_expiry)
+    logger.info(
+        "SHARE_EXPIRY | base={base} | adjusted={adjusted} | holiday_extension={extended}",
+        base=_base_expiry.strftime("%d/%m/%Y"),
+        adjusted=share_expiry.strftime("%d/%m/%Y"),
+        extended=share_expiry != _base_expiry,
+    )
     global_share_stats = ShareStats()
 
     display = RPADisplay(mode=mode, dry_run=dry_run, folders=folder_paths)
@@ -218,8 +231,16 @@ def main(
                 try:
                     stats = cleaner.clean(folder_path)
                     global_stats.merge(stats)
-                    # Share the folder after a successful clean (skip in dry-run)
-                    if not dry_run:
+                    # Share the folder after a successful clean (skip in dry-run,
+                    # and skip when the folder was NOT fully emptied — no point
+                    # publishing an "Anyone" link to a folder with leftover files).
+                    if stats.incomplete:
+                        logger.warning(
+                            "SHARE | SKIPPED | reason=folder_not_emptied | folder={folder}",
+                            folder=folder_path,
+                        )
+                        display.log("SHAERR", f"{folder_path}  ·  compartir omitido  ·  carpeta no vaciada")
+                    elif not dry_run:
                         key = folder_key(folder_path)
                         password = share_passwords.get(key, generate_password())
                         share_result = share_folder(page, folder_path, password, share_expiry)
@@ -294,6 +315,9 @@ def main(
     # 5. Summary final
     # -----------------------------------------------------------------------
     _emit_summary(global_stats, start_time, global_share_stats)
+
+    if global_stats.incomplete:
+        sys.exit(4)
 
 
 # ---------------------------------------------------------------------------
@@ -442,16 +466,27 @@ def _emit_summary(
     share_error_count = len(share_stats.share_errors) if share_stats else 0
     logger.info(
         "RUN END | deleted={deleted} | would_delete={would_delete} | "
-        "skipped={skipped} | errors={errors} | "
+        "skipped={skipped} | errors={errors} | incomplete={incomplete} | "
         "Shared: {shared}, Share errors: {share_errors} | elapsed={elapsed:.1f}s",
         deleted=len(stats.deleted),
         would_delete=len(stats.would_delete),
         skipped=len(stats.skipped),
         errors=len(stats.errors),
+        incomplete=len(stats.incomplete),
         shared=shared_count,
         share_errors=share_error_count,
         elapsed=elapsed,
     )
+
+    if stats.incomplete:
+        logger.error(
+            "INCOMPLETE_FOLDERS | count={n} | folders={folders}",
+            n=len(stats.incomplete),
+            folders=stats.incomplete,
+        )
+        click.echo("\nATENCION: las siguientes carpetas NO quedaron completamente vacías:")
+        for folder in stats.incomplete:
+            click.echo(f"  - {folder}")
 
 
 # ---------------------------------------------------------------------------

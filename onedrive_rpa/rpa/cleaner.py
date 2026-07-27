@@ -2,17 +2,40 @@
 rpa/cleaner.py — Limpieza recursiva de carpetas OneDrive via Playwright.
 
 Estrategia: DFS in-place (ADR-4).
-    1. Listar items visibles en la carpeta actual.
+    1. Listar items visibles en la carpeta actual (listado exhaustivo,
+       ver rpa/_navigation.py::list_items — a prueba de virtualización).
     2. Para cada item:
-       - Si es carpeta → entrar, recursión, volver.
-       - Si es archivo → borrar item-por-item (ADR-5), loggear.
-    3. Re-listar tras cada delete para compensar re-render del DOM (lista virtualizada).
+       - Si es carpeta → entrar, recursión, volver. Si tras la recursión la
+         subcarpeta quedó sin archivos ni subcarpetas propias, se borra la
+         subcarpeta en sí (borrado bottom-up, ver ADR-11 abajo).
+       - Si es archivo → borrar en bloque (select-all + toolbar) y
+         VERIFICAR con un loop acotado de "listar → borrar → re-listar"
+         (hasta MAX_EMPTY_VERIFY_PASSES intentos) en vez de una sola pasada.
 
-Borrado NO se reintenta (ADR-7). Navegación y listing SÍ (via with_retry).
+ADR-11 (borrado de subcarpetas vacías): la carpeta raíz pasada a `clean()`
+(la que está listada en folders.json) NUNCA se borra — solo su contenido.
+Pero cualquier subcarpeta encontrada DENTRO de esa raíz, a cualquier
+profundidad, si termina sin archivos ni subcarpetas propias tras procesarla,
+se borra a su vez. `_process_items()` devuelve un bool "esta carpeta quedó
+vacía" y es el LLAMADOR (el nivel padre) quien decide borrar la subcarpeta
+— `clean()` nunca actúa sobre su propio bool de retorno, así la raíz jamás
+se borra a sí misma.
+
+Por qué el loop de verificación NO viola ADR-7 (borrado no idempotente):
+    cada pasada del loop es un ciclo completo y fresco — listar de nuevo,
+    seleccionar-todo de nuevo, borrar de nuevo — nunca reutiliza referencias
+    de fila (Locator) de una pasada anterior. Lo que se reintenta es "la
+    carpeta sigue teniendo archivos", nunca un delete puntual sobre una fila
+    ya resuelta. Si tras todos los intentos algo sigue pendiente, la carpeta
+    se marca como `incomplete` en vez de reportarse como éxito silencioso.
+
+Borrado NO se reintenta a nivel de operación individual (ADR-7).
+Navegación y listing SÍ (via with_retry).
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from loguru import logger
@@ -22,6 +45,10 @@ from onedrive_rpa.config import (
     SELECTORS,
     ACTION_TIMEOUT_MS,
     NAV_TIMEOUT_MS,
+    MAX_EMPTY_VERIFY_PASSES,
+    EMPTY_VERIFY_SETTLE_MS,
+    EMPTY_VERIFY_POLL_INTERVAL_MS,
+    EMPTY_VERIFY_MAX_SETTLE_MS,
 )
 from onedrive_rpa.auth.session import check_session_expired, SessionExpiredError
 from onedrive_rpa.rpa._retry import with_retry
@@ -50,6 +77,12 @@ class CleanStats:
     would_delete: list[str] = field(default_factory=list)  # dry-run
     skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
+    """Carpetas que, tras agotar MAX_EMPTY_VERIFY_PASSES intentos de
+    borrado+verificación, todavía tienen archivos pendientes."""
+    deleted_folders: list[str] = field(default_factory=list)
+    """Subcarpetas (nunca la raíz pasada a clean()) borradas por haber
+    quedado vacías tras procesar su contenido (ver ADR-11)."""
 
     @property
     def deleted_count(self) -> int:
@@ -59,12 +92,73 @@ class CleanStats:
     def error_count(self) -> int:
         return len(self.errors)
 
+    @property
+    def incomplete_count(self) -> int:
+        return len(self.incomplete)
+
     def merge(self, other: "CleanStats") -> None:
         """Fusiona las stats de otra limpieza en esta instancia."""
         self.deleted.extend(other.deleted)
         self.would_delete.extend(other.would_delete)
         self.skipped.extend(other.skipped)
         self.errors.extend(other.errors)
+        self.incomplete.extend(other.incomplete)
+        self.deleted_folders.extend(other.deleted_folders)
+
+
+# ---------------------------------------------------------------------------
+# Helper puro: diff entre listado pendiente y listado tras el borrado bulk
+# ---------------------------------------------------------------------------
+
+
+def _diff_listing(
+    pending: set[str], remaining: set[str]
+) -> tuple[list[str], set[str], list[str]]:
+    """
+    Compara el conjunto de nombres pendientes de borrar contra lo que sigue
+    apareciendo tras una pasada de borrado bulk. Función pura, sin Playwright.
+
+    Args:
+        pending: Nombres de archivo que se intentó borrar en esta pasada.
+        remaining: Nombres de archivo observados en el re-listado posterior.
+
+    Returns:
+        Tupla ``(confirmed_deleted, still_pending, newly_appeared)``:
+            - confirmed_deleted: nombres en *pending* que ya NO están en
+              *remaining* (borrado confirmado), ordenados alfabéticamente.
+            - still_pending: nombres presentes en ambos conjuntos — quedan
+              pendientes para el próximo intento del loop.
+            - newly_appeared: nombres en *remaining* que NO estaban en
+              *pending* (subida concurrente durante la corrida). No cuentan
+              como fallo del borrado ni se agregan a `pending` para reintento
+              — no formaban parte del pedido de borrado original.
+    """
+    confirmed_deleted = sorted(pending - remaining)
+    still_pending = pending & remaining
+    newly_appeared = sorted(remaining - pending)
+    return confirmed_deleted, still_pending, newly_appeared
+
+
+def _wait_for_delete_settle(page: Page) -> None:
+    """
+    Wait for a bulk delete to finish propagating server-side before re-listing.
+
+    A single fixed EMPTY_VERIFY_SETTLE_MS sleep was long enough for small
+    deletes but a live probe showed 100+ file bulk deletes can still be
+    settling well past 1.5s — polling the row count until it stops changing
+    (or a bounded budget runs out) adapts to both cases without penalizing
+    small folders with a longer fixed sleep.
+    """
+    page.wait_for_timeout(EMPTY_VERIFY_SETTLE_MS)
+
+    start = time.monotonic()
+    last_count = page.locator(SELECTORS["folder_row"]).count()
+    while (time.monotonic() - start) * 1000 < EMPTY_VERIFY_MAX_SETTLE_MS:
+        page.wait_for_timeout(EMPTY_VERIFY_POLL_INTERVAL_MS)
+        current_count = page.locator(SELECTORS["folder_row"]).count()
+        if current_count == last_count:
+            return
+        last_count = current_count
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +192,10 @@ class FolderCleaner:
         Limpia todos los archivos dentro de folder_path de forma recursiva.
 
         Los subdirectorios se procesan antes de los archivos del nivel actual (DFS).
-        Los directorios en sí NO se eliminan.
+        La carpeta raíz (folder_path) en sí NUNCA se elimina — pero cualquier
+        subcarpeta encontrada dentro de ella, a cualquier profundidad, se borra
+        si queda vacía tras procesar su contenido (ver ADR-11 en el docstring
+        del módulo).
 
         Args:
             folder_path: Ruta relativa dentro de OneDrive, p. ej. "Documentos/Reportes".
@@ -122,16 +219,24 @@ class FolderCleaner:
             logger.warning("SKIP | folder={folder} reason=not_found", folder=folder_path)
             raise
 
+        # El bool de retorno ("¿folder_path quedó vacío?") se descarta a
+        # propósito: la raíz configurada en folders.json nunca se borra,
+        # solo sus descendientes (ADR-11).
         self._process_items(folder_path, stats)
 
         self._cb.on_folder_done(folder_path, len(stats.deleted), len(stats.errors))
         return stats
 
-    def _process_items(self, current_path: str, stats: CleanStats) -> None:
+    def _process_items(self, current_path: str, stats: CleanStats) -> bool:
         """
         Lista items visibles y los procesa en orden DFS.
 
         Re-lista tras cada delete para compensar virtualización del DOM.
+
+        Returns:
+            True si, al terminar, current_path quedó sin archivos y sin
+            subcarpetas propias — señal para que el LLAMADOR decida borrar
+            esta carpeta (nunca lo decide esta misma llamada, ver ADR-11).
         """
         check_session_expired(self._page)
 
@@ -141,19 +246,27 @@ class FolderCleaner:
         folders = [i for i in items if i.is_folder]
         files = [i for i in items if not i.is_folder]
 
-        # Primero: entrar en cada subcarpeta
+        # Primero: entrar en cada subcarpeta, y borrarla si quedó vacía
+        subfolders_all_removed = True
+
         for item in folders:
             child_path = f"{current_path}/{item.name}"
             try:
                 _enter_folder(self._page, item.name)
-                self._process_items(child_path, stats)
+                child_is_empty = self._process_items(child_path, stats)
                 _go_back(self._page, current_path)
+
+                if child_is_empty:
+                    self._remove_empty_folder(item.name, child_path, stats)
+                else:
+                    subfolders_all_removed = False
             except FolderNotFoundError:
                 logger.warning(
                     "SKIP | path={path} reason=folder_disappeared",
                     path=child_path,
                 )
                 stats.skipped.append(child_path)
+                subfolders_all_removed = False
             except SessionExpiredError:
                 raise
             except Exception as exc:
@@ -163,6 +276,7 @@ class FolderCleaner:
                     reason=str(exc),
                 )
                 stats.errors.append(child_path)
+                subfolders_all_removed = False
 
         # Luego: borrar archivos del nivel actual con select-all + toolbar delete
         check_session_expired(self._page)
@@ -170,7 +284,7 @@ class FolderCleaner:
         current_files = [i for i in current_items if not i.is_folder]
 
         if not current_files:
-            return
+            return subfolders_all_removed
 
         if self._dry_run:
             for item in current_files:
@@ -178,26 +292,106 @@ class FolderCleaner:
                 logger.info("WOULD_DELETE | {path}", path=item_path)
                 stats.would_delete.append(item_path)
                 self._cb.on_file_would_delete(item_path)
-        else:
+            return subfolders_all_removed
+
+        # Loop acotado de verificar-y-rehacer (reemplaza la pasada única).
+        # Cada iteración es un ciclo fresco: listar → seleccionar-todo →
+        # borrar → re-listar. Nunca reutiliza referencias de fila de una
+        # iteración anterior (ADR-7 sigue respetado — ver docstring del módulo).
+        pending: set[str] = {item.name for item in current_files}
+        hard_failure = False
+
+        for attempt in range(1, MAX_EMPTY_VERIFY_PASSES + 1):
             try:
-                _bulk_delete_files(self._page, len(current_files))
-                for item in current_files:
-                    item_path = f"{current_path}/{item.name}"
+                check_session_expired(self._page)
+                _bulk_delete_files(self._page, len(pending))
+                _wait_for_delete_settle(self._page)
+
+                remaining_items = list_items(self._page)
+                remaining = {i.name for i in remaining_items if not i.is_folder}
+
+                confirmed_deleted, still_pending, newly_appeared = _diff_listing(
+                    pending, remaining
+                )
+
+                for name in confirmed_deleted:
+                    item_path = f"{current_path}/{name}"
                     logger.info("DELETED | {path}", path=item_path)
                     stats.deleted.append(item_path)
                     self._cb.on_file_deleted(item_path)
+
+                if newly_appeared:
+                    logger.warning(
+                        "CONCURRENT_UPLOAD | path={path} | items={items}",
+                        path=current_path,
+                        items=newly_appeared,
+                    )
+
+                pending = still_pending
+                if not pending:
+                    break
             except SessionExpiredError:
                 raise
             except Exception as exc:
-                for item in current_files:
-                    item_path = f"{current_path}/{item.name}"
-                    logger.error(
-                        "ERROR | path={path} reason={reason}",
-                        path=item_path,
-                        reason=str(exc),
-                    )
+                logger.error(
+                    "ERROR | path={path} attempt={attempt} reason={reason}",
+                    path=current_path,
+                    attempt=attempt,
+                    reason=str(exc),
+                )
+                hard_failure = True
+                for name in pending:
+                    item_path = f"{current_path}/{name}"
                     stats.errors.append(item_path)
                     self._cb.on_error(item_path, str(exc))
+                break
+
+        if pending:
+            stats.incomplete.append(current_path)
+            logger.error(
+                "INCOMPLETE | path={p} | remaining={n} | passes={a}",
+                p=current_path,
+                n=len(pending),
+                a=MAX_EMPTY_VERIFY_PASSES,
+            )
+            self._cb.on_folder_incomplete(current_path, len(pending))
+            if not hard_failure:
+                stats.errors.append(current_path)
+            return False
+
+        return subfolders_all_removed
+
+    def _remove_empty_folder(
+        self, folder_name: str, folder_path: str, stats: CleanStats
+    ) -> None:
+        """
+        Borra una subcarpeta que quedó vacía tras procesar su contenido
+        (ADR-11). Nunca se llama sobre la carpeta raíz pasada a clean().
+
+        En dry-run solo loggea/reporta lo que se haría, sin tocar el DOM.
+        """
+        if self._dry_run:
+            logger.info("WOULD_DELETE_FOLDER | {path}", path=folder_path)
+            stats.would_delete.append(folder_path)
+            self._cb.on_file_would_delete(folder_path)
+            return
+
+        try:
+            check_session_expired(self._page)
+            _delete_single_row(self._page, folder_name)
+            logger.info("DELETED_FOLDER | {path}", path=folder_path)
+            stats.deleted_folders.append(folder_path)
+            self._cb.on_folder_deleted(folder_path)
+        except SessionExpiredError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "ERROR | path={path} reason={reason}",
+                path=folder_path,
+                reason=str(exc),
+            )
+            stats.errors.append(folder_path)
+            self._cb.on_error(folder_path, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -246,22 +440,14 @@ def _go_back(page: Page, parent_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _bulk_delete_files(page: Page, file_count: int) -> None:
+def _click_toolbar_delete_and_confirm(page: Page) -> None:
     """
-    Selecciona todos los ítems y los elimina via la barra de comandos.
+    Click en "Eliminar" de la barra de comandos y confirma el modal si aparece.
 
-    Flujo:
-        1. Click en la celda header del select-all (el div, no el input).
-        2. Click en "Eliminar" de la barra de comandos.
-           Si no está visible, primero abre el overflow "..." y luego hace click en Eliminar.
-        3. Si aparece modal de confirmación → click en confirmar.
+    Compartido por _bulk_delete_files() (tras select-all) y
+    _delete_single_row() (tras seleccionar el checkbox de una sola fila) —
+    ambos flujos terminan igual una vez que la selección ya está hecha.
     """
-    # 1. Seleccionar todo — click en el div del header (el <span> interno intercepta clics)
-    select_all_cell = page.locator(SELECTORS["select_all"])
-    select_all_cell.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-    select_all_cell.click(timeout=ACTION_TIMEOUT_MS)
-
-    # 2. Toolbar Eliminar — esperar reactivamente que el toolbar actualice
     toolbar_delete = page.locator(SELECTORS["toolbar_delete"]).first
     try:
         toolbar_delete.wait_for(state="visible", timeout=3_000)
@@ -274,7 +460,6 @@ def _bulk_delete_files(page: Page, file_count: int) -> None:
         toolbar_delete.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
         toolbar_delete.click(timeout=ACTION_TIMEOUT_MS)
 
-    # 3. Modal de confirmación
     confirm_btn = page.locator(SELECTORS["confirm_delete_button"]).first
     try:
         confirm_btn.wait_for(state="visible", timeout=5_000)
@@ -291,24 +476,43 @@ def _bulk_delete_files(page: Page, file_count: int) -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Función de borrado ítem por ítem (NO se decora con with_retry — ADR-7)
-# ---------------------------------------------------------------------------
-
-
-def _delete_item(page: Page, item_name: str) -> None:
+def _bulk_delete_files(page: Page, file_count: int) -> None:
     """
-    Borra el item con el nombre indicado via menú contextual.
+    Selecciona todos los ítems y los elimina via la barra de comandos.
 
     Flujo:
-        1. Click en el botón "..." (context_menu_trigger) de la fila.
-        2. Click en la opción Delete (delete_option).
-        3. Si aparece diálogo de confirmación → click en confirm_delete_button.
+        1. Click en la celda header del select-all (el div, no el input).
+        2. Click en "Eliminar" de la barra de comandos + confirmar
+           (ver _click_toolbar_delete_and_confirm()).
+    """
+    # Seleccionar todo — click en el div del header (el <span> interno intercepta clics)
+    select_all_cell = page.locator(SELECTORS["select_all"])
+    select_all_cell.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
+    select_all_cell.click(timeout=ACTION_TIMEOUT_MS)
+
+    _click_toolbar_delete_and_confirm(page)
+
+
+# ---------------------------------------------------------------------------
+# Función de borrado de una única fila (NO se decora con with_retry — ADR-7)
+# ---------------------------------------------------------------------------
+
+
+def _delete_single_row(page: Page, item_name: str) -> None:
+    """
+    Selecciona UNA sola fila por su checkbox y la borra via la barra de
+    comandos — mismo mecanismo verificado en producción que _bulk_delete_files()
+    (y que sharer.py usa para seleccionar una fila puntual antes de compartir),
+    pero marcando solo el checkbox de esa fila en vez del select-all del header.
+
+    Usado para borrar subcarpetas que quedaron vacías tras procesar su
+    contenido (ADR-11).
 
     NO se reintenta (ADR-7): el borrado no es idempotente; reintentar
-    podría borrar un archivo diferente que ocupó la misma posición visual.
+    podría borrar un ítem diferente que ocupó la misma posición visual.
 
     Raises:
+        ValueError: Si la fila con ese nombre no está en el DOM.
         Exception: Cualquier error de Playwright se propaga al llamador,
             que lo loggea como ERROR y continúa (no exit).
     """
@@ -316,33 +520,10 @@ def _delete_item(page: Page, item_name: str) -> None:
     if row is None:
         raise ValueError(f"Item '{item_name}' no encontrado en el DOM para borrar")
 
-    # Hover sobre el nombre para que aparezca el botón "Más acciones"
-    name_el = row.locator(SELECTORS["item_name"])
-    name_el.hover(timeout=ACTION_TIMEOUT_MS)
+    checkbox = row.locator(SELECTORS["row_checkbox"]).first
+    checkbox.click(timeout=ACTION_TIMEOUT_MS)
 
-    trigger = row.locator(SELECTORS["context_menu_trigger"])
-    trigger.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-    trigger.click(timeout=ACTION_TIMEOUT_MS)
-
-    # Esperar que aparezca la opción delete en el menú
-    delete_option = page.locator(SELECTORS["delete_option"])
-    delete_option.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-    delete_option.click(timeout=ACTION_TIMEOUT_MS)
-
-    # Confirmar si aparece diálogo
-    confirm_btn = page.locator(SELECTORS["confirm_delete_button"])
-    try:
-        confirm_btn.wait_for(state="visible", timeout=3_000)
-        confirm_btn.click(timeout=ACTION_TIMEOUT_MS)
-    except PlaywrightTimeoutError:
-        # No hubo diálogo de confirmación → operación ya ejecutada directamente
-        pass
-
-    # Esperar que el DOM actualice (la fila desaparece)
-    try:
-        page.wait_for_load_state("networkidle", timeout=ACTION_TIMEOUT_MS)
-    except PlaywrightTimeoutError:
-        pass
+    _click_toolbar_delete_and_confirm(page)
 
 
 # ---------------------------------------------------------------------------

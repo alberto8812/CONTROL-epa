@@ -393,9 +393,10 @@ def collect_subfolders(page: "Page", source_folder: str) -> list[str]:  # type: 
         List of subfolder names (strings) found at the immediate level.
 
     Note:
-        v1 limitation: OneDrive virtualises its list. If the folder contains
-        >= 50 items the result may be truncated. A warning is logged when this
-        threshold is reached.
+        list_items() defaults to exhaustive=True, which scrolls the listing
+        until the row count stabilizes before reading the DOM — this covers
+        the OneDrive DOM virtualization case that used to truncate large
+        folders (previously a documented >= 50 items limitation here).
     """
     from playwright.sync_api import Page  # local import keeps module loadable without playwright
 
@@ -413,14 +414,6 @@ def collect_subfolders(page: "Page", source_folder: str) -> list[str]:  # type: 
     # for it burns the full timeout (15 s) on every call.
     items = list_items(page)
     folders = [item.name for item in items if item.is_folder]
-
-    if len(folders) >= 50:
-        logger.warning(
-            "REPORT_SUBFOLDERS | count={n} | source={s} | "
-            "WARNING: list may be truncated by DOM virtualization (v1 limitation)",
-            n=len(folders),
-            s=source_folder,
-        )
 
     return folders
 

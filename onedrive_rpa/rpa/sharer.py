@@ -11,14 +11,17 @@ are fully unit-testable.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 from loguru import logger
 
 from onedrive_rpa.config import (
     SELECTORS,
     SHARE_SELECTORS,
+    SHARE_MONTH_NAMES,
+    SHARE_CALENDAR_MAX_MONTH_STEPS,
     ACTION_TIMEOUT_MS,
     NAV_TIMEOUT_MS,
 )
@@ -80,6 +83,149 @@ def _format_expiry(dt: datetime) -> str:
         Zero-padded date string, e.g. ``"08/06/2026"``.
     """
     return dt.strftime("%d/%m/%Y")
+
+
+_MONTH_YEAR_RE = re.compile(r"([a-záéíóúñ]+)\D*?(\d{4})", re.IGNORECASE)
+
+
+def _parse_month_year(label: str) -> tuple[int, int]:
+    """Parse a localized month/year calendar header into ``(month, year)``.
+
+    Handles both Spanish (``"agosto de 2026"``, ``"agosto 2026"``) and
+    English (``"August 2026"``) headers, case-insensitive.
+
+    Args:
+        label: The calendar header text.
+
+    Returns:
+        ``(month, year)`` where ``month`` is 1-12.
+
+    Raises:
+        ShareError: If *label* cannot be parsed into a known month name and a
+                    4-digit year.
+    """
+    match = _MONTH_YEAR_RE.search(label.strip())
+    if not match:
+        raise ShareError(f"Could not parse calendar header {label!r}")
+
+    month_name = match.group(1).lower()
+    year_str = match.group(2)
+
+    month = SHARE_MONTH_NAMES.get(month_name)
+    if month is None:
+        raise ShareError(f"Unknown month name {month_name!r} in calendar header {label!r}")
+
+    return month, int(year_str)
+
+
+def _month_delta(from_my: tuple[int, int], to_my: tuple[int, int]) -> int:
+    """Return the signed number of months from *from_my* to *to_my*.
+
+    Args:
+        from_my: ``(month, year)`` of the starting point.
+        to_my: ``(month, year)`` of the target.
+
+    Returns:
+        Positive if *to_my* is later, negative if earlier, 0 if equal.
+        E.g. ``(2026, 12) -> (2027, 1)`` is ``1``;
+             ``(2026, 8) -> (2026, 8)`` is ``0``;
+             ``(2027, 1) -> (2026, 12)`` is ``-1``.
+    """
+    from_month, from_year = from_my
+    to_month, to_year = to_my
+    return (to_year - from_year) * 12 + (to_month - from_month)
+
+
+def _expiry_matches(actual: str, expected: datetime) -> bool:
+    """Strict semantic comparison between a read-back date string and *expected*.
+
+    Replaces the old loose check (``expiry_str in actual or actual.strip()``)
+    which silently accepted ANY non-empty value — including an empty-looking
+    string that still had a truthy `.strip()` due to whitespace-adjacent bugs
+    — as success. This function requires the string to actually parse to the
+    same calendar date as *expected*.
+
+    Args:
+        actual: The raw string read back from the expiry input (e.g. via
+                ``input_value()``).
+        expected: The datetime the input is supposed to represent.
+
+    Returns:
+        ``True`` only if *actual* parses (as ``%d/%m/%Y``, zero-padded or
+        not) to the same ``.date()`` as *expected*. ``False`` for empty,
+        whitespace-only, or unparseable input — including ISO-formatted
+        dates, which this input format never produces.
+    """
+    stripped = actual.strip()
+    if not stripped:
+        return False
+
+    # %d/%m/%Y already accepts non-zero-padded day/month (e.g. "8/6/2026") in
+    # CPython's strptime, so a single attempt covers both the zero-padded and
+    # lenient forms. A manual split is kept as a defensive fallback in case
+    # that leniency ever changes across Python versions.
+    try:
+        parsed = datetime.strptime(stripped, "%d/%m/%Y")
+        return parsed.date() == expected.date()
+    except ValueError:
+        pass
+
+    parts = stripped.split("/")
+    if len(parts) == 3:
+        try:
+            day, month, year = (int(p) for p in parts)
+            return date(year, month, day) == expected.date()
+        except ValueError:
+            return False
+
+    # Fluent UI's own input_value() does NOT echo back "DD/MM/YYYY" — it
+    # renders the full localized date, e.g. "miércoles, 5 de ago de 2026"
+    # (confirmed via live probe against a real share dialog). Extract
+    # day/month-token/year regardless of the leading weekday name, then
+    # resolve the month token (abbreviated or full, ES or EN) against
+    # SHARE_MONTH_NAMES by prefix match (Spanish abbreviations like "ago"
+    # are simple prefixes of the full name, e.g. "agosto").
+    match = re.search(r"(\d{1,2})\s+de\s+([a-záéíóúñ]+)\.?\s+de\s+(\d{4})", stripped, re.IGNORECASE)
+    if match:
+        day_str, month_token, year_str = match.groups()
+        month_token = month_token.lower().rstrip(".")
+        month = SHARE_MONTH_NAMES.get(month_token)
+        if month is None:
+            for name, num in SHARE_MONTH_NAMES.items():
+                if name.startswith(month_token) or month_token.startswith(name):
+                    month = num
+                    break
+        if month is not None:
+            try:
+                return date(int(year_str), month, int(day_str)) == expected.date()
+            except ValueError:
+                return False
+
+    return False
+
+
+def _day_button_selector(day: int, month_name: str, year: int) -> str:
+    """Build the Playwright selector for a calendar day-button cell.
+
+    Day cells are ``<button class="fui-CalendarDayGrid__dayButton ...">``
+    with an ``aria-label`` in the exact format ``"{day}, {MonthName}, {year}"``
+    (e.g. ``"6, Julio, 2026"``) — no leading zero on the day, the fully
+    localized month name, and no "de" between the parts.
+
+    Args:
+        day: Day of month, 1-31 (no zero-padding — matches the DOM's format).
+        month_name: The exact localized month name string as rendered by the
+                    tenant (read live from an existing day cell's aria-label —
+                    never hardcoded, since it must match the tenant's locale).
+        year: Full 4-digit year.
+
+    Returns:
+        A CSS attribute selector scoped to ``button.fui-CalendarDayGrid__dayButton``
+        so it can never accidentally match the unrelated
+        ``.od-ExpirationDatePicker-delete`` ("Quitar fecha de caducidad") button.
+    """
+    label = f"{day}, {month_name}, {year}"
+    return f"button.fui-CalendarDayGrid__dayButton[aria-label='{label}']"
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +388,147 @@ def _open_share_dialog(page: "Page", folder_name: str) -> None:  # type: ignore[
         raise ShareError(f"Link-settings panel did not open for {folder_name!r}: {exc}") from exc
 
 
+def _set_expiry_date(page: "Page", frame: "Frame", expiry_date: datetime) -> None:  # type: ignore[name-defined]
+    """Set the sharing link expiry date via real calendar-click navigation.
+
+    The expiry input is a readOnly Fluent UI control: ``.fill()``/``.clear()``
+    are rejected and keystrokes typed via ``page.keyboard.type()`` are
+    swallowed by the calendar callout it opens — there is no way to set the
+    date by typing. The only reliable approach is genuine UI navigation:
+
+        1. Fast path: if the input already shows the target date, return.
+        2. Click the input — this opens a calendar callout directly (no
+           separate icon click needed).
+        3. Read the callout's month/year header, parse it, and compute how
+           many months (and which direction) separate it from the target.
+        4. Click the correct nav arrow that many times, re-reading the
+           header after each click to confirm it actually advanced (a
+           disabled arrow would otherwise spin this forever).
+        5. Once on the correct month, read the *exact* localized month name
+           live from an existing day cell's ``aria-label`` — never assume a
+           hardcoded string matches the tenant's rendering — then click the
+           day cell built from that string.
+        6. Close the callout and strictly verify via ``.input_value()`` +
+           ``_expiry_matches()`` (React-controlled input — ``.input_value()``
+           reflects live state; ``get_attribute("value")`` can be stale).
+
+    The whole sequence (steps 2-6) is retried up to twice, restarting from
+    the input click each time, mirroring the previous retry count.
+
+    Args:
+        page: Authenticated Playwright page (keyboard/page-level waits).
+        frame: The shareFrame Frame containing the expiry input and calendar.
+        expiry_date: The target expiry datetime.
+
+    Raises:
+        ShareError: If the date cannot be confirmed as set after all
+                    attempts, calendar navigation stalls, or the target month
+                    is unreachable within ``SHARE_CALENDAR_MAX_MONTH_STEPS``.
+    """
+    expiry_str = _format_expiry(expiry_date)
+    expiry_input = frame.locator(SHARE_SELECTORS["expiry_input"]).first
+    expiry_input.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
+
+    # Idempotent fast path — value may already be correct (e.g. a retried
+    # outer @with_retry() attempt on _apply_share_settings itself).
+    try:
+        current = expiry_input.input_value(timeout=2_000)
+    except Exception:
+        current = ""
+    if _expiry_matches(current, expiry_date):
+        return
+
+    target_my = (expiry_date.month, expiry_date.year)
+    last_actual = current
+
+    for attempt in range(2):
+        try:
+            expiry_input.click(timeout=ACTION_TIMEOUT_MS)
+
+            month_year_label = frame.locator(SHARE_SELECTORS["expiry_month_year_label"]).first
+            month_year_label.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
+
+            nav_buttons = frame.locator(SHARE_SELECTORS["expiry_month_nav_buttons"])
+            prev_button = nav_buttons.nth(0)
+            next_button = nav_buttons.nth(1)
+
+            header_text = month_year_label.inner_text(timeout=ACTION_TIMEOUT_MS)
+            current_my = _parse_month_year(header_text)
+            delta = _month_delta(current_my, target_my)
+
+            if abs(delta) > SHARE_CALENDAR_MAX_MONTH_STEPS:
+                raise ShareError(
+                    f"Expiry date {expiry_str!r} requires {abs(delta)} calendar "
+                    f"month steps, exceeding SHARE_CALENDAR_MAX_MONTH_STEPS="
+                    f"{SHARE_CALENDAR_MAX_MONTH_STEPS}"
+                )
+
+            button = next_button if delta > 0 else prev_button
+            for _ in range(abs(delta)):
+                before = month_year_label.inner_text(timeout=ACTION_TIMEOUT_MS)
+                button.click(timeout=ACTION_TIMEOUT_MS)
+                page.wait_for_timeout(300)
+                after = month_year_label.inner_text(timeout=ACTION_TIMEOUT_MS)
+                if after == before:
+                    raise ShareError(
+                        f"Calendar month header did not advance past {before!r} "
+                        f"— nav arrow may be disabled"
+                    )
+
+            # Read the exact localized month name from the now-current header
+            # text itself (e.g. "Agosto 2026" -> "Agosto"). Do NOT sample the
+            # first day-cell button for this: the grid's leading cells are
+            # often overflow days from the ADJACENT month (e.g. late-July
+            # cells padding the first week of an August view), so ".first"
+            # would silently grab the wrong month's name.
+            current_header_text = month_year_label.inner_text(timeout=ACTION_TIMEOUT_MS)
+            header_parts = current_header_text.rsplit(" ", 1)
+            if len(header_parts) != 2:
+                raise ShareError(
+                    f"Could not parse month name out of calendar header "
+                    f"{current_header_text!r}"
+                )
+            month_name = header_parts[0].strip()
+
+            day_selector = _day_button_selector(expiry_date.day, month_name, expiry_date.year)
+            day_button = frame.locator(day_selector).first
+            day_button.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
+            day_button.click(timeout=ACTION_TIMEOUT_MS)
+
+            # Let the callout close/settle before reading the value back.
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            page.wait_for_timeout(500)
+
+            try:
+                last_actual = expiry_input.input_value(timeout=2_000)
+            except Exception:
+                last_actual = ""
+
+            if _expiry_matches(last_actual, expiry_date):
+                return
+
+            logger.debug(
+                "SHARE | expiry date did not land (input shows {v!r}), attempt={a}",
+                v=last_actual,
+                a=attempt,
+            )
+        except ShareError as exc:
+            logger.debug(
+                "SHARE | expiry calendar navigation failed on attempt {a}: {e}",
+                a=attempt,
+                e=str(exc),
+            )
+
+    raise ShareError(
+        f"Could not set expiry date {expiry_str!r} via calendar: input shows {last_actual!r}"
+    )
+
+
 @with_retry()
-def _apply_share_settings(page: "Page", password: str, expiry_str: str) -> None:  # type: ignore[name-defined]
+def _apply_share_settings(page: "Page", password: str, expiry_date: datetime) -> None:  # type: ignore[name-defined]
     """Configure the share settings panel (inside shareFrame iframe).
 
     Decorated with @with_retry() — the settings form overwrites link state on
@@ -252,7 +537,7 @@ def _apply_share_settings(page: "Page", password: str, expiry_str: str) -> None:
     Args:
         page: Authenticated Playwright page.
         password: Plaintext password for the sharing link.
-        expiry_str: Date string in ``DD/MM/YYYY`` format.
+        expiry_date: The target expiry datetime.
 
     Raises:
         ShareError: If a required selector cannot be found or interacted with.
@@ -266,37 +551,11 @@ def _apply_share_settings(page: "Page", password: str, expiry_str: str) -> None:
     except Exception:
         logger.debug("SHARE | anyone_option not clickable — may already be selected")
 
-    # Set expiry date — the input has readonly='' so .fill()/.clear() are rejected.
-    # Strategy: click to focus (may open a calendar popup), then type the date
-    # string char-by-char via keyboard events. Fluent UI DatePicker processes
-    # keydown events even on readonly inputs to update its internal state.
-    # Press Tab to confirm and close any popup before moving on.
-    # Retry once if the input value does not reflect the typed date afterwards.
-    try:
-        expiry_input = frame.locator(SHARE_SELECTORS["expiry_input"]).first
-        expiry_input.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-
-        for attempt in range(2):
-            expiry_input.click(timeout=ACTION_TIMEOUT_MS)
-            page.wait_for_timeout(600)  # calendar popup needs time to render
-            page.keyboard.type(expiry_str)  # "DD/MM/YYYY"
-            page.keyboard.press("Tab")      # confirm selection and close popup
-            page.wait_for_timeout(500)
-
-            # Verify the date was accepted — read back the input value.
-            try:
-                actual = expiry_input.get_attribute("value", timeout=2_000) or ""
-            except Exception:
-                actual = ""
-            if expiry_str in actual or actual.strip():
-                break  # date landed — stop retrying
-            if attempt == 0:
-                logger.debug(
-                    "SHARE | expiry date may not have landed (got {v!r}), retrying",
-                    v=actual,
-                )
-    except Exception as exc:
-        raise ShareError(f"Could not set expiry date {expiry_str!r}: {exc}") from exc
+    # Set expiry date — the input has readonly='' so .fill()/.clear() and
+    # page.keyboard.type() are both rejected/swallowed by the calendar popup
+    # it opens. _set_expiry_date() drives real calendar-click navigation
+    # instead (see its docstring for the full flow).
+    _set_expiry_date(page, frame, expiry_date)
 
     # Fill password field — standard input, .fill() works directly.
     try:
@@ -497,7 +756,7 @@ def share_folder(
         _open_share_dialog(page, leaf_name)
 
         # Configure share settings (retried) — handles "¿Quieres actualizar?" dialog
-        _apply_share_settings(page, password, expiry_str)
+        _apply_share_settings(page, password, expiry_date)
 
         # Click Apply, capture URL from "Copiar vínculo" in the re-shown invite panel
         # (after password and expiry are set), then close the dialog.

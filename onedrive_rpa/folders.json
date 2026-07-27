@@ -1,47 +1,47 @@
 {
   "clean": [
     {
-      "path": "Camion/ADMIN/Bz2rr"
+      "path": "camion_2/ADMIN/Bz2rr"
     },
     {
-      "path": "Camion/Administrativo1/Bz5bb"
+      "path": "camion_2/Administrativo1/Bz5bb"
     },
     {
-      "path": "Camion/ADMIN/Bz7tt"
+      "path": "camion_2/ADMIN/Bz7tt"
     },
     {
-      "path": "Camion/Plano/Bz8yy"
+      "path": "camion_2/Plano/Bz8yy"
     },
     {
-      "path": "Camion/ADMIN/Bz12mm"
+      "path": "camion_2/ADMIN/Bz12mm"
     },
     {
-      "path": "Camion/ADMIN/Bz13ff"
+      "path": "camion_2/ADMIN/Bz13ff"
     },
     {
-      "path": "Camion/Administrativo1/Bz17uu"
+      "path": "camion_2/Administrativo1/Bz17uu"
     },
     {
-      "path": "Camion/Plano/Bz21jj"
+      "path": "camion_2/Plano/Bz21jj"
     },
     {
-      "path": "Camion/Plano/Bz22ss"
+      "path": "camion_2/Plano/Bz22ss"
     },
     {
-      "path": "Camion/Administrativo1/BZ23ii"
+      "path": "camion_2/Administrativo1/BZ23ii"
     },
     {
-      "path": "Camion/ADMIN/BZ24kk"
+      "path": "camion_2/ADMIN/BZ24kk"
     },
     {
-      "path": "Camion/ADMIN/Bz27km"
+      "path": "camion_2/ADMIN/Bz27km"
     },
     {
-      "path": "Camion/ADMIN/Bz29aa"
+      "path": "camion_2/ADMIN/Bz29aa"
     }
   ],
   "report": {
-    "source_folder": "Camion",
+    "source_folder": "camion_2",
     "destination_folder": "Tecnología"
   }
 }
