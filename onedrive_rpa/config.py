@@ -470,11 +470,16 @@ SHARE_SELECTORS: dict[str, str] = {
         "button[aria-label='Copy link'], "
         "button:has-text('Copiar vínculo')"
     ),
-    # "Usar nueva contraseña" button in the "¿Quieres actualizar el vínculo?" confirmation dialog.
-    # This dialog appears inside shareFrame when trying to set a new password on a link that
-    # already has a password configured. Must be dismissed before Apply becomes clickable.
+    # "Usar nueva configuración" button in the "¿Quieres actualizar el vínculo?" confirmation
+    # dialog. This dialog appears inside shareFrame when trying to update settings (password/
+    # expiry) on a link that was already configured previously. Must be dismissed before the
+    # invite panel's "Copiar vínculo" becomes reachable. DOM-confirmed text as of 2026-08-03 is
+    # "Usar nueva configuración" — kept the older "Usar nueva contraseña" wording as a fallback
+    # in case OneDrive reverts or shows it in a different context.
     "use_new_password_button": (
+        "button:has-text('Usar nueva configuración'), "
         "button:has-text('Usar nueva contraseña'), "
+        "button:has-text('Use new settings'), "
         "button:has-text('Use new password')"
     ),
 }

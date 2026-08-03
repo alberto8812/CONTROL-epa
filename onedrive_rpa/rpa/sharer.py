@@ -621,7 +621,16 @@ def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
         page.wait_for_timeout(500)
         logger.debug("SHARE | dismissed 'update link?' dialog after Apply")
     except Exception:
-        pass  # dialog didn't appear — first-time share or no existing password
+        # Either the dialog genuinely didn't appear (first-time share, no existing
+        # password), or it appeared with wording our selector doesn't recognize and
+        # is still blocking the invite panel. Tell them apart so a stale selector
+        # doesn't silently degrade every capture to the fallback URL again.
+        if frame.locator("text=¿Quieres actualizar el vínculo?").count() > 0:
+            logger.warning(
+                "SHARE | 'update link?' dialog is present but could not be dismissed "
+                "— use_new_password_button selector may be stale; copy-link capture "
+                "will likely fail"
+            )
 
     # Now the invite panel is (or will be) visible with "Copiar vínculo".
     # The iframe is stable here — the Apply navigation (settings → invite panel) has
