@@ -50,21 +50,37 @@ pipx install .
 
 ### Opción C — desarrollo local (sin instalar globalmente)
 
+Usá un entorno virtual (`venv`) para no depender de paquetes instalados a nivel de sistema:
+
 ```bash
 git clone https://github.com/alberto8812/CONTROL-epa.git
 cd CONTROL-epa
-pip install -r requirements.txt
-```
-
-En Windows usá `python` en lugar de `python3`:
-```bat
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
+playwright install chromium
 ```
 
-Para ejecutar en modo desarrollo (sin instalar):
+En Windows (cmd o PowerShell):
+```bat
+git clone https://github.com/alberto8812/CONTROL-epa.git
+cd CONTROL-epa
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -r requirements.txt
+playwright install chromium
+```
+
+Para ejecutar en modo desarrollo (sin instalar), con el venv activado:
 
 - **macOS/Linux:** `./nova`
 - **Windows:** `python -m novahome`
+
+> **macOS con Homebrew — Python 3.13+/3.14:** algunas dependencias (`greenlet`, requerida por Playwright) todavía no publican wheels precompiladas para versiones muy nuevas de Python y la instalación falla al intentar compilar desde código fuente (`fatal error: 'cstdlib' file not found`). Si tu `python3` por defecto es 3.13+ y falla la instalación, creá el venv con una versión anterior instalada vía Homebrew, por ejemplo:
+> ```bash
+> brew install python@3.12
+> /opt/homebrew/bin/python3.12 -m venv .venv
+> ```
 
 ### Primer uso
 
