@@ -12,6 +12,7 @@ are fully unit-testable.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -24,6 +25,10 @@ from onedrive_rpa.config import (
     SHARE_CALENDAR_MAX_MONTH_STEPS,
     ACTION_TIMEOUT_MS,
     NAV_TIMEOUT_MS,
+    LIST_SCROLL_MAX_PASSES,
+    LIST_SCROLL_SETTLE_MS,
+    LIST_SCROLL_STABLE_READS,
+    LIST_SCROLL_BUDGET_MS,
 )
 from onedrive_rpa.rpa._retry import with_retry
 from onedrive_rpa.rpa._navigation import navigate_to_folder
@@ -294,20 +299,8 @@ def _get_share_frame(page: "Page"):  # type: ignore[name-defined]
     return frame
 
 
-def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ignore[name-defined]
-    """Return the row locator whose heroField text matches *name*, or None.
-
-    Iterates all currently-visible folder rows and compares inner text.
-    This is a minimal inline re-implementation to keep sharer.py decoupled
-    from the private internals of cleaner.py.
-
-    Args:
-        page: Authenticated Playwright page.
-        name: Exact folder name to match (case-sensitive).
-
-    Returns:
-        Playwright Locator for the matching row, or ``None`` if not found.
-    """
+def _scan_rows_for_name(page: "Page", name: str) -> "Locator | None":  # type: ignore[name-defined]
+    """Single-pass scan of currently-mounted rows for an exact name match."""
     rows = page.locator(SELECTORS["folder_row"]).all()
     for row in rows:
         try:
@@ -316,6 +309,62 @@ def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ign
                 return row
         except Exception:
             continue
+    return None
+
+
+def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ignore[name-defined]
+    """Return the row locator whose heroField text matches *name*, or None.
+
+    OneDrive's folder listing is a virtualized Fluent UI DetailsList: only a
+    sliding window of rows is mounted at a time (see _scroll_until_stable()
+    in _navigation.py). A first-paint scan misses any row outside that
+    window, so this nudge-scrolls the listing — same technique as
+    list_items() — until the target name is found or the list goes stable
+    with nothing new mounted.
+
+    Args:
+        page: Authenticated Playwright page.
+        name: Exact folder name to match (case-sensitive).
+
+    Returns:
+        Playwright Locator for the matching row, or ``None`` if not found.
+    """
+    found = _scan_rows_for_name(page, name)
+    if found is not None:
+        return found
+
+    rows = page.locator(SELECTORS["folder_row"]).all()
+    start = time.monotonic()
+    stable_streak = 0
+
+    for _ in range(LIST_SCROLL_MAX_PASSES):
+        elapsed_ms = (time.monotonic() - start) * 1000
+        if elapsed_ms >= LIST_SCROLL_BUDGET_MS or not rows:
+            break
+
+        try:
+            rows[-1].scroll_into_view_if_needed(timeout=ACTION_TIMEOUT_MS)
+        except Exception:
+            try:
+                page.mouse.wheel(0, 2000)
+            except Exception:
+                pass
+
+        page.wait_for_timeout(LIST_SCROLL_SETTLE_MS)
+
+        found = _scan_rows_for_name(page, name)
+        if found is not None:
+            return found
+
+        new_rows = page.locator(SELECTORS["folder_row"]).all()
+        if len(new_rows) == len(rows):
+            stable_streak += 1
+            if stable_streak >= LIST_SCROLL_STABLE_READS:
+                break
+        else:
+            stable_streak = 0
+        rows = new_rows
+
     return None
 
 
