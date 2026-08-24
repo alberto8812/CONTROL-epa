@@ -13,6 +13,7 @@ Covered:
 
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 
 
 class TestFormatExpiry(unittest.TestCase):
@@ -129,6 +130,11 @@ class TestShareStats(unittest.TestCase):
         ShareStats = self._import()
         stats = ShareStats()
         self.assertEqual(stats.share_urls, {})
+
+    def test_sharestate_default_share_skipped_empty(self):
+        """ShareStats() must have share_skipped == []."""
+        ShareStats = self._import()
+        self.assertEqual(ShareStats().share_skipped, [])
 
     def test_sharestate_share_urls_accepts_entries(self):
         """share_urls dict must accept folder_key -> URL entries."""
@@ -334,6 +340,64 @@ class TestDayButtonSelector(unittest.TestCase):
         result = _day_button_selector(15, "Julio", 2026)
         self.assertTrue(result.startswith("button.fui-CalendarDayGrid__dayButton"))
         self.assertNotIn("od-ExpirationDatePicker-delete", result)
+
+
+class _RowName:
+    def __init__(self, name):
+        self.name = name
+
+    def inner_text(self, timeout=2_000):
+        return self.name
+
+
+class _VirtualRow:
+    def __init__(self, name):
+        self.name = name
+
+    def locator(self, selector):
+        return _RowName(self.name)
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        return None
+
+
+class _VirtualRows:
+    def __init__(self, names):
+        self.names = names
+
+    def all(self):
+        return [_VirtualRow(name) for name in self.names]
+
+
+class _VirtualPage:
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+        self.index = 0
+        self.mouse = SimpleNamespace(wheel=lambda *_: None)
+
+    def locator(self, selector):
+        return _VirtualRows(self.snapshots[min(self.index, len(self.snapshots) - 1)])
+
+    def wait_for_timeout(self, ms):
+        if self.index < len(self.snapshots) - 1:
+            self.index += 1
+
+
+class TestFindRowByName(unittest.TestCase):
+    def test_finds_target_after_constant_size_windows_swap_twice(self):
+        """A constant mounted-row count must not terminate a virtualized scan."""
+        from onedrive_rpa.rpa.sharer import _find_row_by_name
+
+        page = _VirtualPage([
+            ["alpha", "beta"],
+            ["gamma", "delta"],
+            ["target", "epsilon"],
+        ])
+
+        row = _find_row_by_name(page, "target")
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.name, "target")
 
 
 if __name__ == "__main__":

@@ -122,7 +122,7 @@ LIST_SCROLL_SETTLE_MS: int = 600
 """Milisegundos de espera tras cada nudge de scroll antes de re-contar filas."""
 
 LIST_SCROLL_STABLE_READS: int = 2
-"""Número de lecturas consecutivas con el mismo conteo de filas para considerar
+"""Número de nudges consecutivos sin nombres distintos nuevos para considerar
 la lista completamente cargada (estable)."""
 
 LIST_SCROLL_BUDGET_MS: int = 60_000

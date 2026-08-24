@@ -171,7 +171,10 @@ class TestWriteExcelEncryptedUrl(unittest.TestCase):
         wb = openpyxl.load_workbook(result)
         ws = wb.active
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        self.assertEqual(headers, ["Folder Name", "Password", "URL", "Creation Date", "Expiry Date"])
+        self.assertEqual(
+            headers,
+            ["Folder Name", "Share Status", "URL", "Encrypted URL", "Password", "Creation Date", "Expiry Date"],
+        )
 
     def test_write_excel_encrypted_url_in_data_row_column_3(self):
         """Short URL (or fallback) must appear in column index 2 (3rd column, zero-based)."""
@@ -192,8 +195,9 @@ class TestWriteExcelEncryptedUrl(unittest.TestCase):
         ws = wb.active
         data_rows = list(ws.iter_rows(min_row=2, values_only=True))
         self.assertEqual(len(data_rows), 1)
-        # column index 2 (third column) must show the short URL
+        # column index 2 (third column) must show the usable short URL
         self.assertEqual(data_rows[0][2], "https://is.gd/abc123")
+        self.assertEqual(data_rows[0][3], "fernet_token_here")
 
     def test_write_excel_missing_encrypted_url_key_uses_empty_string(self):
         """Rows without 'encrypted_url' key must produce empty string in column 3 (backward compat)."""
@@ -212,8 +216,24 @@ class TestWriteExcelEncryptedUrl(unittest.TestCase):
         wb = openpyxl.load_workbook(result)
         ws = wb.active
         data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-        # column 3 (index 2) must be empty string (or None — both acceptable) for missing key
-        self.assertIn(data_rows[0][2], ("", None))
+        # The dedicated encrypted URL column is index 3 (fourth column).
+        self.assertIn(data_rows[0][3], ("", None))
+
+    def test_write_excel_keeps_link_and_ciphertext_in_separate_columns(self):
+        """The normal URL remains linkable while Fernet ciphertext is preserved separately."""
+        import openpyxl
+
+        write_excel = self._import()
+        workbook = openpyxl.load_workbook(write_excel([{
+            "folder_name": "alpha", "share_status": "Shared", "password": "secret",
+            "short_url": "https://is.gd/abc", "encrypted_url": "ciphertext",
+            "creation_date": datetime(2026, 5, 22),
+        }]))
+        ws = workbook.active
+
+        self.assertEqual(ws["C2"].value, "https://is.gd/abc")
+        self.assertEqual(ws["C2"].hyperlink.target, "https://is.gd/abc")
+        self.assertEqual(ws["D2"].value, "ciphertext")
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +527,33 @@ class TestBuildReportRowsShareUrls(unittest.TestCase):
         self.assertEqual(rows[0]["folder_url"], share_url_alpha)
         self.assertIn("beta", rows[1]["folder_url"])  # constructed URL
         self.assertIn("example.sharepoint.com", rows[1]["folder_url"])
+
+
+class TestBuildReportRowsShareStatus(unittest.TestCase):
+    def _import(self):
+        from onedrive_rpa.rpa.reporter import build_report_rows
+        return build_report_rows
+
+    def test_failed_and_skipped_shares_have_no_link_or_password(self):
+        """Non-shared outcomes must not masquerade as usable password/link pairs."""
+        from cryptography.fernet import Fernet
+        build_report_rows = self._import()
+
+        rows = build_report_rows(
+            ["failed", "skipped", "shared"],
+            passwords={"failed": "bad", "skipped": "omit", "shared": "good"},
+            share_statuses={"failed": "Failed", "skipped": "Skipped", "shared": "Shared"},
+            fernet=Fernet(Fernet.generate_key()),
+        )
+
+        self.assertEqual(rows[0]["password"], "")
+        self.assertEqual(rows[0]["short_url"], "")
+        self.assertEqual(rows[0]["encrypted_url"], "")
+        self.assertEqual(rows[1]["password"], "")
+        self.assertEqual(rows[1]["short_url"], "")
+        self.assertEqual(rows[1]["encrypted_url"], "")
+        self.assertEqual(rows[2]["password"], "good")
+        self.assertTrue(rows[2]["short_url"])
 
 
 if __name__ == "__main__":

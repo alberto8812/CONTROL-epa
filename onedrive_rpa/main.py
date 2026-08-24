@@ -235,6 +235,7 @@ def main(
                     # and skip when the folder was NOT fully emptied — no point
                     # publishing an "Anyone" link to a folder with leftover files).
                     if stats.incomplete:
+                        global_share_stats.share_skipped.append(folder_key(folder_path))
                         logger.warning(
                             "SHARE | SKIPPED | reason=folder_not_emptied | folder={folder}",
                             folder=folder_path,
@@ -286,6 +287,12 @@ def main(
                     s=folders_config.report.source_folder,
                     d=folders_config.report.destination_folder,
                 )
+                share_statuses = {
+                    folder_key(path): "Not shared" for path in folder_paths
+                }
+                share_statuses.update({key: "Shared" for key in global_share_stats.shared})
+                share_statuses.update({key: "Failed" for key in global_share_stats.share_errors})
+                share_statuses.update({key: "Skipped" for key in global_share_stats.share_skipped})
                 run_report(
                     page,
                     folders_config.report.source_folder,
@@ -293,6 +300,7 @@ def main(
                     callbacks=display.callbacks,
                     passwords=share_passwords,
                     share_urls=global_share_stats.share_urls,
+                    share_statuses=share_statuses,
                     folder_paths=folder_paths,
                     expiry_date=share_expiry,
                 )

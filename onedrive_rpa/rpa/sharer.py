@@ -53,6 +53,9 @@ class ShareStats:
     share_errors: list[str] = field(default_factory=list)
     """base_name of each folder where sharing failed."""
 
+    share_skipped: list[str] = field(default_factory=list)
+    """base_name of each folder intentionally not shared."""
+
     share_urls: dict = field(default_factory=dict)
     """Mapping of folder base_name -> OneDrive sharing URL captured from 'Copiar vínculo'."""
 
@@ -336,6 +339,24 @@ def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ign
     rows = page.locator(SELECTORS["folder_row"]).all()
     start = time.monotonic()
     stable_streak = 0
+    seen_names: set[str] = set()
+
+    def _scan_and_accumulate(current_rows) -> "Locator | None":
+        """Return the target when mounted and retain all distinct names seen."""
+        for current_row in current_rows:
+            try:
+                cell_text = current_row.locator(SELECTORS["item_name"]).inner_text(
+                    timeout=2_000
+                ).strip()
+                if cell_text:
+                    seen_names.add(cell_text)
+                if cell_text == name:
+                    return current_row
+            except Exception:
+                continue
+        return None
+
+    _scan_and_accumulate(rows)
 
     for _ in range(LIST_SCROLL_MAX_PASSES):
         elapsed_ms = (time.monotonic() - start) * 1000
@@ -352,12 +373,13 @@ def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ign
 
         page.wait_for_timeout(LIST_SCROLL_SETTLE_MS)
 
-        found = _scan_rows_for_name(page, name)
+        names_before_scan = len(seen_names)
+        found = _scan_and_accumulate(page.locator(SELECTORS["folder_row"]).all())
         if found is not None:
             return found
 
         new_rows = page.locator(SELECTORS["folder_row"]).all()
-        if len(new_rows) == len(rows):
+        if len(seen_names) == names_before_scan:
             stable_streak += 1
             if stable_streak >= LIST_SCROLL_STABLE_READS:
                 break

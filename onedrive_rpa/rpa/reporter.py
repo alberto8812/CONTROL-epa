@@ -226,6 +226,7 @@ def build_report_rows(
     fernet=None,
     passwords: dict[str, str] | None = None,
     share_urls: dict[str, str] | None = None,
+    share_statuses: dict[str, str] | None = None,
     full_paths: list[str] | None = None,
     expiry_date: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -261,7 +262,10 @@ def build_report_rows(
                     When provided, the sharing URL is used as-is instead of the
                     path-based URL built by ``_build_folder_url()``.  When
                     ``None`` or a folder has no entry, falls back to the
-                    constructed URL (backward compatible, fail-open).
+                     constructed URL (backward compatible, fail-open).
+        share_statuses: Optional map of folder base name -> ``Shared``,
+                        ``Failed``, ``Skipped``, or ``Not shared``. Non-shared
+                        statuses deliberately produce blank URL and password fields.
         full_paths: Optional list of full folder paths parallel to
                     ``folder_names`` (e.g. ``["Camion/Plano/Bz8yy", ...]``).
                     When provided, the fallback URL is built from the full path
@@ -275,27 +279,36 @@ def build_report_rows(
     active_fernet = fernet if fernet is not None else config.FERNET
     rows = []
     for i, name in enumerate(folder_names):
-        # Use the real OneDrive sharing URL when available (captured from
-        # "Copiar vínculo" after sharing); fall back to the constructed path URL.
-        full_path = full_paths[i] if full_paths and i < len(full_paths) else None
-        url = (share_urls.get(name) if share_urls else None) or (
-            _build_folder_url_from_path(full_path) if full_path
-            else _build_folder_url(source_folder, name)
-        )
-        # Short URL via configured provider (fail-open: falls back to full URL)
-        short_url = _shorten_url(url)
-        # Fernet token kept for auditability — lets you recover the original URL
-        # from the token even if the shortener link expires.
-        if active_fernet is not None:
-            encrypted_url: str = active_fernet.encrypt(url.encode()).decode("ascii")
+        share_status = share_statuses.get(name, "Not shared") if share_statuses is not None else "Shared"
+        if share_status == "Shared":
+            # Use the real OneDrive sharing URL when available (captured from
+            # "Copiar vínculo" after sharing); fall back to the constructed path URL.
+            full_path = full_paths[i] if full_paths and i < len(full_paths) else None
+            url = (share_urls.get(name) if share_urls else None) or (
+                _build_folder_url_from_path(full_path) if full_path
+                else _build_folder_url(source_folder, name)
+            )
+            # Short URL via configured provider (fail-open: falls back to full URL)
+            short_url = _shorten_url(url)
+            # Fernet token kept for auditability — lets you recover the original URL
+            # from the token even if the shortener link expires.
+            encrypted_url = (
+                active_fernet.encrypt(url.encode()).decode("ascii")
+                if active_fernet is not None else ""
+            )
+            pwd = passwords.get(name) if passwords else None
         else:
+            # A failed or intentionally skipped share has no usable password-protected
+            # link. Keep every member of that pair blank rather than implying otherwise.
+            url = ""
+            short_url = ""
             encrypted_url = ""
-        # Use pre-generated password when provided; fall back to fresh generation
-        pwd = passwords.get(name) if passwords else None
+            pwd = ""
         rows.append(
             {
                 "folder_name": name,
-                "password": pwd or generate_password(),
+                "share_status": share_status,
+                "password": pwd or (generate_password() if share_status == "Shared" else ""),
                 "short_url": short_url,
                 "encrypted_url": encrypted_url,
                 "folder_url": url,
@@ -318,7 +331,8 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
     The workbook has a single sheet titled "Report" with a bold header row
     followed by one data row per entry in ``rows``.
 
-    Column order: folder_name, password, creation_date.
+    Column order: folder name, share status, usable URL, encrypted URL,
+    password, creation date, expiry date.
 
     Args:
         rows: List of dicts as produced by :func:`build_report_rows`.
@@ -334,7 +348,10 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
     ws = wb.active
     ws.title = "Report"
 
-    headers = ["Folder Name", "Password", "URL", "Creation Date", "Expiry Date"]
+    headers = [
+        "Folder Name", "Share Status", "URL", "Encrypted URL", "Password",
+        "Creation Date", "Expiry Date",
+    ]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -343,8 +360,10 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
         short_url = row.get("short_url") or row.get("folder_url", "")
         ws.append([
             row["folder_name"],
-            row["password"],
+            row.get("share_status", "Shared"),
             short_url,
+            row.get("encrypted_url", ""),
+            row["password"],
             row["creation_date"],
             row.get("expiry_date"),
         ])
@@ -354,6 +373,11 @@ def write_excel(rows: list[dict[str, Any]]) -> BytesIO:
             url_cell = ws.cell(row=ws.max_row, column=3)
             url_cell.hyperlink = short_url
             url_cell.font = Font(color="0563C1", underline="single")
+
+    for column, width in {
+        "A": 32, "B": 16, "C": 55, "D": 70, "E": 28, "F": 22, "G": 15,
+    }.items():
+        ws.column_dimensions[column].width = width
 
     buf = BytesIO()
     wb.save(buf)
@@ -567,6 +591,7 @@ def run_report(
     callbacks=None,
     passwords: dict[str, str] | None = None,
     share_urls: dict[str, str] | None = None,
+    share_statuses: dict[str, str] | None = None,
     folder_paths: list[str] | None = None,
     expiry_date: "datetime | None" = None,
 ) -> ReportStats:
@@ -587,7 +612,10 @@ def run_report(
                    name) forwarded to ``build_report_rows()``.  When provided,
                    ensures the password in the report matches the one set on the
                    sharing link.  When ``None``, each row generates a fresh
-                   password (backward compatible).
+                    password (backward compatible).
+        share_statuses: Optional map of folder base name to its sharing outcome.
+                        Failed, skipped, and not-shared folders are emitted with
+                        blank link and password fields.
         folder_paths: Optional list of full folder paths from the ``clean`` list
                       (e.g. ``["Camion/Plano/Bz8yy", "Camion/ADMIN/Bz2rr"]``).
                       When provided, the report rows are derived directly from
@@ -640,7 +668,7 @@ def run_report(
 
         rows = build_report_rows(
             subfolders, source_folder=source_folder, fernet=config.FERNET,
-            passwords=passwords, share_urls=share_urls,
+            passwords=passwords, share_urls=share_urls, share_statuses=share_statuses,
             full_paths=full_paths_for_rows, expiry_date=expiry_date,
         )
         stats.rows_generated = len(rows)
