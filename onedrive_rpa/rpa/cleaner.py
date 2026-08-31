@@ -49,6 +49,8 @@ from onedrive_rpa.config import (
     EMPTY_VERIFY_SETTLE_MS,
     EMPTY_VERIFY_POLL_INTERVAL_MS,
     EMPTY_VERIFY_MAX_SETTLE_MS,
+    SELECTION_SETTLE_MS,
+    COMMAND_PROBE_TIMEOUT_MS,
 )
 from onedrive_rpa.auth.session import check_session_expired, SessionExpiredError
 from onedrive_rpa.rpa._retry import with_retry
@@ -57,6 +59,7 @@ from onedrive_rpa.rpa._navigation import (
     ItemInfo,
     navigate_to_folder,
     list_items,
+    names_match,
     FolderNotFoundError,
 )
 
@@ -327,6 +330,16 @@ class FolderCleaner:
                         items=newly_appeared,
                     )
 
+                if not confirmed_deleted:
+                    # Una pasada sin excepción que no borró nada: queda en el
+                    # audit log en vez de pasar por éxito silencioso.
+                    logger.warning(
+                        "NO_PROGRESS | path={path} | attempt={attempt} | pending={n}",
+                        path=current_path,
+                        attempt=attempt,
+                        n=len(pending),
+                    )
+
                 pending = still_pending
                 if not pending:
                     break
@@ -440,57 +453,135 @@ def _go_back(page: Page, parent_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _click_toolbar_delete_and_confirm(page: Page) -> None:
-    """
-    Click en "Eliminar" de la barra de comandos y confirma el modal si aparece.
+class SelectionError(Exception):
+    """La selección de filas no se pudo establecer antes de borrar.
 
-    Compartido por _bulk_delete_files() (tras select-all) y
-    _delete_single_row() (tras seleccionar el checkbox de una sola fila) —
-    ambos flujos terminan igual una vez que la selección ya está hecha.
+    Se lanza en vez de dejar que el flujo termine en un timeout genérico del
+    toolbar: sin selección confirmada nunca se hace click en "Eliminar".
+    """
+
+
+def _resolve_delete_command(page: Page, timeout_ms: int) -> Locator | None:
+    """
+    Devuelve el comando "Eliminar" listo para clickear, o None si la barra
+    no lo ofrece.
+
+    Prueba primero el botón directo y, si no está, abre el overflow "...".
+    Que ninguno de los dos aparezca NO es un fallo de red: es la respuesta
+    "no hay nada seleccionado" — la barra de comandos sin selección no
+    renderiza ni "Eliminar" ni el overflow. Por eso se devuelve None (dato
+    para el llamador) en vez de propagar un TimeoutError.
     """
     toolbar_delete = page.locator(SELECTORS["toolbar_delete"]).first
     try:
-        toolbar_delete.wait_for(state="visible", timeout=3_000)
-        toolbar_delete.click(timeout=ACTION_TIMEOUT_MS)
+        toolbar_delete.wait_for(state="visible", timeout=timeout_ms)
+        return toolbar_delete
     except PlaywrightTimeoutError:
-        # Eliminar no está visible → abrir overflow "..." primero
-        overflow = page.locator(SELECTORS["toolbar_overflow"]).first
-        overflow.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-        overflow.click(timeout=ACTION_TIMEOUT_MS)
-        toolbar_delete.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-        toolbar_delete.click(timeout=ACTION_TIMEOUT_MS)
+        pass
 
+    overflow = page.locator(SELECTORS["toolbar_overflow"]).first
+    try:
+        overflow.wait_for(state="visible", timeout=timeout_ms)
+        overflow.click(timeout=ACTION_TIMEOUT_MS)
+        toolbar_delete.wait_for(state="visible", timeout=timeout_ms)
+        return toolbar_delete
+    except PlaywrightTimeoutError:
+        return None
+
+
+def _confirm_delete_and_settle(page: Page) -> None:
+    """
+    Confirma el modal de borrado (si el tenant lo muestra) y espera a que las
+    filas se desmonten.
+
+    Ambas esperas son opcionales por razones legítimas — algunos tenants
+    borran sin modal, y un borrado de una sola fila entre muchas nunca
+    desmonta la lista entera — pero la ausencia de desmontaje se LOGEA:
+    combinada con un re-listado que no cambió, es la firma de una pasada que
+    no borró nada. Silenciarla fue lo que hizo que la pasada 1 sobre Bz13ff
+    (2026-08-31) se reportara como exitosa habiendo borrado cero archivos.
+    """
     confirm_btn = page.locator(SELECTORS["confirm_delete_button"]).first
     try:
         confirm_btn.wait_for(state="visible", timeout=5_000)
         confirm_btn.click(timeout=ACTION_TIMEOUT_MS)
     except PlaywrightTimeoutError:
-        pass  # Algunos tenants borran directo sin modal
+        logger.debug("DELETE | sin modal de confirmación (tenant borra directo)")
 
-    # Esperar que las filas desaparezcan del DOM (más rápido que networkidle)
     try:
         page.wait_for_selector(
             SELECTORS["folder_row"], timeout=10_000, state="detached"
         )
     except PlaywrightTimeoutError:
-        pass
+        logger.warning("DELETE_NO_DETACH | las filas no se desmontaron tras el borrado")
+
+
+def _click_toolbar_delete_and_confirm(page: Page) -> None:
+    """
+    Click en "Eliminar" de la barra de comandos y confirma el modal si aparece.
+
+    Asume que la selección YA está hecha y verificada por el llamador.
+
+    Raises:
+        SelectionError: Si la barra de comandos no ofrece "Eliminar" — señal
+            de que no hay nada seleccionado.
+    """
+    command = _resolve_delete_command(page, ACTION_TIMEOUT_MS)
+    if command is None:
+        raise SelectionError(
+            "La barra de comandos no ofrece 'Eliminar' — no hay selección activa"
+        )
+
+    command.click(timeout=ACTION_TIMEOUT_MS)
+    _confirm_delete_and_settle(page)
 
 
 def _bulk_delete_files(page: Page, file_count: int) -> None:
     """
     Selecciona todos los ítems y los elimina via la barra de comandos.
 
-    Flujo:
-        1. Click en la celda header del select-all (el div, no el input).
-        2. Click en "Eliminar" de la barra de comandos + confirmar
-           (ver _click_toolbar_delete_and_confirm()).
+    El select-all del header es un TOGGLE, no un "seleccionar todo"
+    idempotente. Si una pasada anterior del loop de verificar-y-rehacer dejó
+    la lista seleccionada, el click de esta pasada la DESELECCIONA: la barra
+    de comandos vuelve a su estado sin selección — sin "Eliminar" y sin
+    overflow "..." — y el código viejo se quedaba esperando ese overflow
+    hasta el timeout (run 2026-08-31, Camion/ADMIN/Bz13ff: 39 archivos
+    marcados como error por UN solo fallo de toolbar).
+
+    Por eso el resultado del click se VERIFICA contra la propia barra de
+    comandos: que "Eliminar" esté alcanzable es exactamente la condición que
+    el siguiente paso necesita, así que es mejor evidencia que cualquier
+    atributo del DOM. Si no lo está, se vuelve a clickear (restaurando la
+    selección) y se comprueba de nuevo. Dos intentos fallidos son un
+    SelectionError explícito, nunca un click a ciegas sobre "Eliminar".
+
+    Raises:
+        SelectionError: Si tras dos intentos la selección no se estableció.
     """
-    # Seleccionar todo — click en el div del header (el <span> interno intercepta clics)
     select_all_cell = page.locator(SELECTORS["select_all"])
     select_all_cell.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
-    select_all_cell.click(timeout=ACTION_TIMEOUT_MS)
 
-    _click_toolbar_delete_and_confirm(page)
+    for attempt in (1, 2):
+        select_all_cell.click(timeout=ACTION_TIMEOUT_MS)
+        page.wait_for_timeout(SELECTION_SETTLE_MS)
+
+        command = _resolve_delete_command(page, COMMAND_PROBE_TIMEOUT_MS)
+        if command is not None:
+            command.click(timeout=ACTION_TIMEOUT_MS)
+            _confirm_delete_and_settle(page)
+            return
+
+        logger.warning(
+            "SELECT_ALL_NO_COMMAND | attempt={a} | files={n} | "
+            "el click dejó la barra sin 'Eliminar' (toggle apagado)",
+            a=attempt,
+            n=file_count,
+        )
+
+    raise SelectionError(
+        f"select-all no dejó una selección activa tras 2 intentos "
+        f"({file_count} archivos pendientes)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +632,7 @@ def _find_row_by_name(page: Page, name: str) -> Locator | None:
         try:
             name_el = row.locator(SELECTORS["item_name"])
             current_name = name_el.inner_text(timeout=ACTION_TIMEOUT_MS).strip()
-            if current_name == name:
+            if names_match(current_name, name):
                 return row
         except Exception:
             continue

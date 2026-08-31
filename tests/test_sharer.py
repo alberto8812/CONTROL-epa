@@ -400,5 +400,47 @@ class TestFindRowByName(unittest.TestCase):
         self.assertEqual(row.name, "target")
 
 
+    def test_finds_target_when_only_the_case_differs(self):
+        """Regression for the 2026-08-24 / 2026-08-31 runs.
+
+        folders.json spells the folder 'BZ23ii'; the OneDrive row renders
+        'Bz23ii'. Navigation succeeded (SharePoint URLs ignore case) so the
+        folder was cleaned, but the share-row lookup compared with a raw
+        `==` and raised 'Folder row not found in DOM' on every retry.
+        """
+        from onedrive_rpa.rpa.sharer import _find_row_by_name
+
+        page = _VirtualPage([["alpha", "Bz23ii", "beta"]])
+
+        row = _find_row_by_name(page, "BZ23ii")
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.name, "Bz23ii")
+
+    def test_finds_target_case_insensitively_after_scrolling(self):
+        """The case-folded comparison must also apply to rows that only
+        mount after a scroll nudge, not just the first-paint scan."""
+        from onedrive_rpa.rpa.sharer import _find_row_by_name
+
+        page = _VirtualPage([
+            ["alpha", "beta"],
+            ["gamma", "delta"],
+            ["Bz24kk", "epsilon"],
+        ])
+
+        row = _find_row_by_name(page, "BZ24kk")
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.name, "Bz24kk")
+
+    def test_unrelated_name_still_not_found(self):
+        """Folding case must not turn a genuine miss into a false match."""
+        from onedrive_rpa.rpa.sharer import _find_row_by_name
+
+        page = _VirtualPage([["alpha", "beta"]])
+
+        self.assertIsNone(_find_row_by_name(page, "Bz23ii"))
+
+
 if __name__ == "__main__":
     unittest.main()

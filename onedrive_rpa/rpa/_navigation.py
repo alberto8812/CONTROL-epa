@@ -10,11 +10,13 @@ Public surface:
     FolderNotFoundError — exception for missing/unreachable folders
     navigate_to_folder  — navigate Playwright page to an OneDrive folder URL
     list_items          — list visible items in the current OneDrive folder
+    names_match         — compare two OneDrive item names the way SharePoint does
 """
 
 from __future__ import annotations
 
 import time
+import unicodedata
 from typing import NamedTuple
 
 from loguru import logger
@@ -44,6 +46,38 @@ class ItemInfo(NamedTuple):
     """Represents a single item (file or folder) visible in an OneDrive listing."""
     name: str
     is_folder: bool
+
+
+
+# ---------------------------------------------------------------------------
+# Name comparison
+# ---------------------------------------------------------------------------
+
+
+def normalize_name(name: str) -> str:
+    """Return *name* in the canonical form used to compare OneDrive items.
+
+    Applies, in order: Unicode NFC composition, surrounding-whitespace strip,
+    and case folding.
+    """
+    return unicodedata.normalize("NFC", name).strip().casefold()
+
+
+def names_match(a: str, b: str) -> bool:
+    """Return True when *a* and *b* denote the same OneDrive item.
+
+    A raw ``==`` is the wrong comparison here. Item names reach this code from
+    two different places: the DOM (rendered by OneDrive) and folders.json
+    (typed by a human). SharePoint itself treats item names case-insensitively
+    — two items differing only in case cannot coexist in the same folder — so
+    a case difference between the two sources is a spelling variation of one
+    item, never two items. Unicode composition differs the same way: an
+    accented character typed on macOS (NFD) and the same character served by
+    OneDrive (NFC) are visually identical but not byte-equal.
+
+    Folding both is therefore safe and cannot merge two distinct siblings.
+    """
+    return normalize_name(a) == normalize_name(b)
 
 
 # ---------------------------------------------------------------------------

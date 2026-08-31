@@ -136,6 +136,19 @@ _process_items() antes de marcar una carpeta como 'incomplete'. Deliberadamente
 NO reusa MAX_RETRIES: ese es semánticamente para reintentos por excepción,
 este es para reintentos por estado (la carpeta sigue teniendo archivos)."""
 
+SELECTION_SETTLE_MS: int = 800
+"""Milisegundos de espera tras hacer click en el select-all del header, antes
+de comprobar si la barra de comandos ofrece 'Eliminar'. La barra de SharePoint
+se re-renderiza cuando cambia la selección; sondearla de inmediato lee el
+estado anterior."""
+
+COMMAND_PROBE_TIMEOUT_MS: int = 3_000
+"""Timeout de SONDEO (no de acción) al buscar 'Eliminar' o el overflow '...'
+tras seleccionar. Es corto a propósito: su ausencia no es un fallo de red, es
+la respuesta 'no hay nada seleccionado', y esa respuesta se necesita rápido
+para poder re-seleccionar dentro de la misma pasada en vez de gastar 20s
+esperando un botón que la barra sin selección nunca va a renderizar."""
+
 EMPTY_VERIFY_SETTLE_MS: int = 1_500
 """Milisegundos de espera FIJA (piso) tras disparar el borrado bulk, antes de
 empezar a sondear (ver EMPTY_VERIFY_POLL_INTERVAL_MS). 1.5s alcanza para
@@ -321,6 +334,10 @@ SELECTORS: dict[str, str] = {
         "[role='menuitem'][aria-label='Eliminar'], [role='menuitem'][aria-label='Delete'], "
         "[data-automationid='deleteCommand']"
     ),
+
+    # Fila actualmente seleccionada. Sirve como evidencia secundaria del estado
+    # de selección; la evidencia primaria es que la barra ofrezca "Eliminar".
+    "row_selected": "[role='row'][aria-selected='true']",
 
     # Botón overflow "..." en la barra de comandos (cuando "Eliminar" queda oculto por el ancho).
     "toolbar_overflow": "[data-automationid='more'], button[aria-label='Más'], button[aria-label='More']",

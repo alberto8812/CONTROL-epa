@@ -388,5 +388,174 @@ class TestEmptySubfolderDeletion(unittest.TestCase):
         self.assertEqual(stats.deleted_folders, [])
 
 
+
+# ---------------------------------------------------------------------------
+# _bulk_delete_files() — select-all toggle + command-bar verification
+# ---------------------------------------------------------------------------
+
+
+class _FakeCommand:
+    """Stub for a command-bar button Locator ('Eliminar' or the '...' overflow).
+
+    `available` is a zero-arg callable so the stub reflects the *current*
+    selection state on every probe, the way the real command bar does.
+    """
+
+    def __init__(self, available, on_click=None):
+        self._available = available
+        self._on_click = on_click
+        self.clicks = 0
+
+    @property
+    def first(self):
+        return self
+
+    def wait_for(self, state=None, timeout=None):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        if not self._available():
+            raise PlaywrightTimeoutError(f"Timeout {timeout}ms exceeded")
+
+    def click(self, timeout=None):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        if not self._available():
+            raise PlaywrightTimeoutError(f"Timeout {timeout}ms exceeded")
+        self.clicks += 1
+        if self._on_click is not None:
+            self._on_click()
+
+
+class _FakeSelectAll:
+    """Stub for the select-all header cell — a TOGGLE, like the real one."""
+
+    def __init__(self, page):
+        self._page = page
+        self.clicks = 0
+
+    def wait_for(self, state=None, timeout=None):
+        return None
+
+    def click(self, timeout=None):
+        self.clicks += 1
+        if self._page.select_all_is_inert:
+            return
+        self._page.selected = not self._page.selected
+
+
+class _FakeCommandBarPage:
+    """Minimal page stub covering the select-all → command-bar → confirm flow.
+
+    Args:
+        selected: initial selection state (True simulates a previous verify
+            pass that left the listing selected).
+        delete_in_overflow: "Eliminar" is only reachable through the "..."
+            overflow, not directly on the bar.
+        select_all_is_inert: clicking select-all changes nothing (the click
+            lands but the listing never selects).
+    """
+
+    def __init__(self, selected=False, delete_in_overflow=False,
+                 select_all_is_inert=False):
+        self.selected = selected
+        self.select_all_is_inert = select_all_is_inert
+        self._delete_in_overflow = delete_in_overflow
+        self.overflow_open = False
+
+        self.select_all = _FakeSelectAll(self)
+        self.delete_cmd = _FakeCommand(self._delete_available)
+        self.overflow_cmd = _FakeCommand(
+            lambda: self.selected, on_click=self._open_overflow
+        )
+        self.confirm_cmd = _FakeCommand(lambda: False)
+        self.wait_calls = 0
+
+    def _open_overflow(self):
+        self.overflow_open = True
+
+    def _delete_available(self):
+        if not self.selected:
+            return False
+        return self.overflow_open if self._delete_in_overflow else True
+
+    def locator(self, selector):
+        from onedrive_rpa.config import SELECTORS
+        if selector == SELECTORS["select_all"]:
+            return self.select_all
+        if selector == SELECTORS["toolbar_delete"]:
+            return self.delete_cmd
+        if selector == SELECTORS["toolbar_overflow"]:
+            return self.overflow_cmd
+        if selector == SELECTORS["confirm_delete_button"]:
+            return self.confirm_cmd
+        raise AssertionError(f"unexpected selector: {selector}")
+
+    def wait_for_timeout(self, ms):
+        self.wait_calls += 1
+
+    def wait_for_selector(self, selector, timeout=None, state=None):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        raise PlaywrightTimeoutError("rows never detached")
+
+
+class TestBulkDeleteSelection(unittest.TestCase):
+    """Tests for _bulk_delete_files() selection handling.
+
+    Regression for the 2026-08-31 run on Camion/ADMIN/Bz13ff: pass 1 raised
+    no exception yet deleted 0 files, then pass 2 died on a 10s timeout
+    waiting for the "..." overflow. The header select-all is a TOGGLE, so a
+    second pass over a still-selected listing DESELECTS everything and leaves
+    the command bar in its no-selection state — no "Eliminar", no overflow.
+    """
+
+    def _fn(self):
+        from onedrive_rpa.rpa.cleaner import _bulk_delete_files
+        return _bulk_delete_files
+
+    def test_healthy_pass_selects_once_and_deletes(self):
+        _bulk_delete_files = self._fn()
+        page = _FakeCommandBarPage(selected=False)
+
+        _bulk_delete_files(page, 39)
+
+        self.assertEqual(page.select_all.clicks, 1)
+        self.assertEqual(page.delete_cmd.clicks, 1)
+
+    def test_stale_selection_is_reselected_instead_of_timing_out(self):
+        """The real failure: the listing arrives already selected, so the
+        first click clears it. The pass must notice the command bar went
+        empty and click again rather than hunting for an overflow that the
+        no-selection command bar does not render."""
+        _bulk_delete_files = self._fn()
+        page = _FakeCommandBarPage(selected=True)
+
+        _bulk_delete_files(page, 39)
+
+        self.assertEqual(page.select_all.clicks, 2)
+        self.assertEqual(page.delete_cmd.clicks, 1)
+
+    def test_delete_reached_through_overflow(self):
+        """When 'Eliminar' is hidden behind '...', the overflow is opened
+        and the command still gets clicked exactly once."""
+        _bulk_delete_files = self._fn()
+        page = _FakeCommandBarPage(selected=False, delete_in_overflow=True)
+
+        _bulk_delete_files(page, 5)
+
+        self.assertEqual(page.overflow_cmd.clicks, 1)
+        self.assertEqual(page.delete_cmd.clicks, 1)
+
+    def test_selection_never_takes_raises_selection_error(self):
+        """If two select-all attempts leave the command bar empty, fail loud
+        with a named error — never click delete on an unknown selection."""
+        from onedrive_rpa.rpa.cleaner import SelectionError
+        _bulk_delete_files = self._fn()
+        page = _FakeCommandBarPage(selected=False, select_all_is_inert=True)
+
+        with self.assertRaises(SelectionError):
+            _bulk_delete_files(page, 39)
+
+        self.assertEqual(page.delete_cmd.clicks, 0)
+        self.assertEqual(page.select_all.clicks, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

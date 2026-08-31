@@ -31,7 +31,7 @@ from onedrive_rpa.config import (
     LIST_SCROLL_BUDGET_MS,
 )
 from onedrive_rpa.rpa._retry import with_retry
-from onedrive_rpa.rpa._navigation import navigate_to_folder
+from onedrive_rpa.rpa._navigation import navigate_to_folder, names_match
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +303,12 @@ def _get_share_frame(page: "Page"):  # type: ignore[name-defined]
 
 
 def _scan_rows_for_name(page: "Page", name: str) -> "Locator | None":  # type: ignore[name-defined]
-    """Single-pass scan of currently-mounted rows for an exact name match."""
+    """Single-pass scan of currently-mounted rows for a name match."""
     rows = page.locator(SELECTORS["folder_row"]).all()
     for row in rows:
         try:
             cell_text = row.locator(SELECTORS["item_name"]).inner_text(timeout=2_000).strip()
-            if cell_text == name:
+            if names_match(cell_text, name):
                 return row
         except Exception:
             continue
@@ -327,7 +327,9 @@ def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ign
 
     Args:
         page: Authenticated Playwright page.
-        name: Exact folder name to match (case-sensitive).
+        name: Folder name to match. Compared with names_match(), so a case
+            or Unicode-composition difference between folders.json and the
+            rendered row does not hide the folder.
 
     Returns:
         Playwright Locator for the matching row, or ``None`` if not found.
@@ -350,7 +352,7 @@ def _find_row_by_name(page: "Page", name: str) -> "Locator | None":  # type: ign
                 ).strip()
                 if cell_text:
                     seen_names.add(cell_text)
-                if cell_text == name:
+                if names_match(cell_text, name):
                     return current_row
             except Exception:
                 continue

@@ -171,5 +171,51 @@ class TestScrollUntilStable(unittest.TestCase):
         self.assertEqual(set(result.keys()), set(names_5))
 
 
+class TestNamesMatch(unittest.TestCase):
+    """Tests for names_match() — folder/file name comparison.
+
+    OneDrive item names are compared against names typed by a human in
+    folders.json. SharePoint itself treats item names case-insensitively
+    (two items differing only in case cannot coexist in one folder), so the
+    comparison must not be a raw `==`.
+    """
+
+    def _fn(self):
+        from onedrive_rpa.rpa._navigation import names_match
+        return names_match
+
+    def test_exact_match(self):
+        names_match = self._fn()
+        self.assertTrue(names_match("Bz23ii", "Bz23ii"))
+
+    def test_case_insensitive_match(self):
+        """The real 2026-08-31 failure: folders.json says 'BZ23ii', the DOM
+        row reads 'Bz23ii'. Navigation works (SharePoint URLs ignore case)
+        but the row lookup used to miss it forever."""
+        names_match = self._fn()
+        self.assertTrue(names_match("Bz23ii", "BZ23ii"))
+        self.assertTrue(names_match("BZ24KK", "bz24kk"))
+
+    def test_surrounding_whitespace_ignored(self):
+        names_match = self._fn()
+        self.assertTrue(names_match("  Bz23ii ", "Bz23ii"))
+
+    def test_unicode_composition_ignored(self):
+        """'Tecnología' typed on macOS (NFD) must match the NFC form OneDrive
+        renders — otherwise two visually identical names never compare equal."""
+        names_match = self._fn()
+        nfc = "Tecnolog\u00eda"          # í as a single code point
+        nfd = "Tecnologi\u0301a"         # i + combining acute
+        self.assertTrue(names_match(nfc, nfd))
+
+    def test_different_names_do_not_match(self):
+        names_match = self._fn()
+        self.assertFalse(names_match("Bz23ii", "Bz24kk"))
+
+    def test_empty_never_matches_non_empty(self):
+        names_match = self._fn()
+        self.assertFalse(names_match("", "Bz23ii"))
+
+
 if __name__ == "__main__":
     unittest.main()
