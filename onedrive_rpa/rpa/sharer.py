@@ -568,10 +568,23 @@ def _set_expiry_date(page: "Page", frame: "Frame", expiry_date: datetime) -> Non
             day_button.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
             day_button.click(timeout=ACTION_TIMEOUT_MS)
 
-            # Let the callout close/settle before reading the value back.
+            # Let the callout close on its own before reading the value back.
+            #
+            # Do NOT press Escape here. The Fluent Calendar callout already
+            # closes itself the moment a day cell is selected, so Escape has no
+            # callout left to dismiss — it bubbles up to the share dialog and
+            # tears down the ENTIRE link-settings panel. DOM-confirmed live on
+            # 2026-09-07: immediately after Escape both the expiry input and the
+            # Apply button are gone from shareFrame (inputPresent=False,
+            # applyPresent=False). That made the read-back below raise, log a
+            # bogus "expiry date did not land (input shows '')", and then every
+            # @with_retry attempt on _apply_share_settings timed out waiting for
+            # an input that no longer existed — even though the date HAD landed.
             try:
-                page.keyboard.press("Escape")
+                month_year_label.wait_for(state="hidden", timeout=ACTION_TIMEOUT_MS)
             except Exception:
+                # Already detached, or the header selector resolved to something
+                # that outlives the callout — the settle wait below still covers us.
                 pass
             page.wait_for_timeout(500)
 
