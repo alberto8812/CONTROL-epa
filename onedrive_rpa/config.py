@@ -130,11 +130,17 @@ LIST_SCROLL_BUDGET_MS: int = 60_000
 de LIST_SCROLL_MAX_PASSES. Cualquiera de los dos límites que se alcance primero
 corta el loop y logea un WARNING."""
 
-MAX_EMPTY_VERIFY_PASSES: int = 4
+MAX_EMPTY_VERIFY_PASSES: int = 5
 """Número máximo de ciclos listar→seleccionar-todo→borrar→re-listar en
 _process_items() antes de marcar una carpeta como 'incomplete'. Deliberadamente
 NO reusa MAX_RETRIES: ese es semánticamente para reintentos por excepción,
-este es para reintentos por estado (la carpeta sigue teniendo archivos)."""
+este es para reintentos por estado (la carpeta sigue teniendo archivos).
+
+Subido de 4 a 5 al introducir la recuperación por re-navegación: una pasada
+que lanza excepción (p. ej. timeout esperando el header de selección) ahora
+consume su intento y se recupera re-navegando, así que una pasada extra
+compensa la pasada "perdida" sin cambiar el orden de magnitud del peor caso
+(una carpeta que nunca converge cuesta un ciclo bulk más, segundos)."""
 
 SELECTION_SETTLE_MS: int = 800
 """Milisegundos de espera tras hacer click en el select-all del header, antes
@@ -410,6 +416,35 @@ SHARE_MONTH_NAMES: dict[str, int] = {
 }
 """Mapa nombre de mes (minúsculas, ES+EN) -> número 1-12, por si cambia el
 idioma del tenant. Usado por _parse_month_year() en rpa/sharer.py."""
+
+SHARE_MAX_ATTEMPTS: int = 2
+"""Total attempts of the whole share flow (navigate → open dialog → settings →
+Apply) in share_folder(). An attempt fails when the share URL is not captured
+or the anonymous verification proves the link opens WITHOUT a password."""
+
+SHARE_VERIFY_NAV_TIMEOUT_MS: int = 30_000
+"""Navigation timeout when opening the captured share link in a fresh,
+anonymous browser context (_verify_link_requires_password)."""
+
+SHARE_VERIFY_TIMEOUT_MS: int = 15_000
+"""How long to wait, after navigating, for either the password prompt or
+OneDrive folder content to become visible. Neither within this budget →
+verification result is None (unverified), never a failure."""
+
+SHARE_VERIFY_SETTLE_MS: int = 1_500
+"""Extra wait after folder content shows up, before concluding the link has
+NO password prompt — guards against content rendering before the prompt."""
+
+SHARE_VERIFY_SELECTORS: dict[str, str] = {
+    # Password gate shown to anonymous visitors of a password-protected link.
+    "password_prompt": "input[type='password']",
+    # Any sign that the folder content itself rendered (no password gate).
+    "folder_content": (
+        "[role='grid'], "
+        "[data-automationid='DetailsRow'], "
+        "[role='row']"
+    ),
+}
 
 SHARE_SELECTORS: dict[str, str] = {
     # Toolbar share button — "Compartir" / "Share"

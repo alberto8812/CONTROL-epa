@@ -442,5 +442,360 @@ class TestFindRowByName(unittest.TestCase):
         self.assertIsNone(_find_row_by_name(page, "Bz23ii"))
 
 
+
+# ---------------------------------------------------------------------------
+# Password read-back (_ensure_password_value)
+# ---------------------------------------------------------------------------
+
+
+class _FakePasswordInput:
+    """Password input whose read-back values are scripted per call."""
+
+    def __init__(self, readbacks):
+        self.readbacks = list(readbacks)
+        self.typed = []
+        self.cleared = 0
+
+    def wait_for(self, state=None, timeout=None):
+        return None
+
+    def input_value(self, timeout=None):
+        if len(self.readbacks) > 1:
+            return self.readbacks.pop(0)
+        return self.readbacks[0]
+
+    def click(self, timeout=None):
+        return None
+
+    def fill(self, value, timeout=None):
+        if value == "":
+            self.cleared += 1
+
+    def press_sequentially(self, value, delay=None, timeout=None):
+        self.typed.append(value)
+
+
+class _FakeFrame:
+    def __init__(self, pwd_input):
+        self.pwd_input = pwd_input
+
+    def locator(self, selector):
+        return SimpleNamespace(first=self.pwd_input)
+
+
+class TestEnsurePasswordValue(unittest.TestCase):
+    def test_matching_readback_does_not_refill(self):
+        from onedrive_rpa.rpa.sharer import _ensure_password_value
+
+        pwd = _FakePasswordInput(["s3cret"])
+        _ensure_password_value(_FakeFrame(pwd), "s3cret")
+
+        self.assertEqual(pwd.typed, [])
+
+    def test_mismatch_is_refilled_then_accepted(self):
+        """A cleared field (re-render after 'use new settings') is re-typed."""
+        from onedrive_rpa.rpa.sharer import _ensure_password_value
+
+        pwd = _FakePasswordInput(["", "s3cret"])
+        _ensure_password_value(_FakeFrame(pwd), "s3cret")
+
+        self.assertEqual(pwd.typed, ["s3cret"])
+        self.assertGreaterEqual(pwd.cleared, 1)
+
+    def test_persistent_mismatch_raises_share_error(self):
+        from onedrive_rpa.rpa.sharer import _ensure_password_value, ShareError
+
+        pwd = _FakePasswordInput([""])
+        with self.assertRaises(ShareError):
+            _ensure_password_value(_FakeFrame(pwd), "s3cret")
+        self.assertTrue(pwd.typed)
+
+    def test_error_message_never_contains_the_password(self):
+        from onedrive_rpa.rpa.sharer import _ensure_password_value, ShareError
+
+        pwd = _FakePasswordInput(["wrong-value"])
+        with self.assertRaises(ShareError) as ctx:
+            _ensure_password_value(_FakeFrame(pwd), "s3cret")
+        self.assertNotIn("s3cret", str(ctx.exception))
+        self.assertNotIn("wrong-value", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Anonymous link verification (_verify_link_requires_password)
+# ---------------------------------------------------------------------------
+
+
+class _FakeVisLocator:
+    def __init__(self, visible):
+        self.visible = visible
+
+    @property
+    def first(self):
+        return self
+
+    def is_visible(self, timeout=None):
+        return self.visible
+
+
+class _FakeAnonPage:
+    def __init__(self, outcome, url="https://tenant.sharepoint.com/:f:/g/x"):
+        self.outcome = outcome  # "password" | "content" | "timeout"
+        self.url = url
+
+    def goto(self, url, timeout=None, wait_until=None):
+        return None
+
+    def wait_for_selector(self, selector, state=None, timeout=None):
+        if self.outcome == "timeout":
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            raise PlaywrightTimeoutError("timeout")
+        return object()
+
+    def wait_for_timeout(self, ms):
+        return None
+
+    def locator(self, selector):
+        from onedrive_rpa.config import SHARE_VERIFY_SELECTORS
+        if selector == SHARE_VERIFY_SELECTORS["password_prompt"]:
+            return _FakeVisLocator(self.outcome == "password")
+        return _FakeVisLocator(self.outcome == "content")
+
+
+class _FakeAnonContext:
+    def __init__(self, page):
+        self.page = page
+        self.closed = False
+
+    def new_page(self):
+        return self.page
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeBrowser:
+    def __init__(self, page):
+        self.contexts_made = []
+        self.page = page
+        self.kwargs = None
+
+    def new_context(self, **kwargs):
+        self.kwargs = kwargs
+        ctx = _FakeAnonContext(self.page)
+        self.contexts_made.append(ctx)
+        return ctx
+
+
+def _page_with_browser(browser):
+    return SimpleNamespace(context=SimpleNamespace(browser=browser))
+
+
+class TestVerifyLinkRequiresPassword(unittest.TestCase):
+    def _run(self, outcome, url=None):
+        from onedrive_rpa.rpa.sharer import _verify_link_requires_password
+
+        anon = _FakeAnonPage(outcome) if url is None else _FakeAnonPage(outcome, url)
+        browser = _FakeBrowser(anon)
+        result = _verify_link_requires_password(
+            _page_with_browser(browser), "https://tenant.sharepoint.com/:f:/g/x"
+        )
+        return result, browser
+
+    def test_password_prompt_means_true(self):
+        result, browser = self._run("password")
+        self.assertIs(result, True)
+        self.assertTrue(browser.contexts_made[0].closed)
+
+    def test_content_without_prompt_means_false(self):
+        result, browser = self._run("content")
+        self.assertIs(result, False)
+        self.assertTrue(browser.contexts_made[0].closed)
+
+    def test_neither_within_timeout_means_none(self):
+        result, browser = self._run("timeout")
+        self.assertIsNone(result)
+        self.assertTrue(browser.contexts_made[0].closed)
+
+    def test_anonymous_context_has_no_storage_state(self):
+        _, browser = self._run("password")
+        self.assertNotIn("storage_state", browser.kwargs)
+
+    def test_login_redirect_is_unverified(self):
+        """Tenant forcing sign-in for anonymous visitors cannot prove anything."""
+        result, _ = self._run(
+            "password", url="https://login.microsoftonline.com/common/oauth2"
+        )
+        self.assertIsNone(result)
+
+    def test_missing_browser_is_unverified(self):
+        from onedrive_rpa.rpa.sharer import _verify_link_requires_password
+
+        self.assertIsNone(
+            _verify_link_requires_password(_page_with_browser(None), "https://x/:f:/y")
+        )
+
+
+# ---------------------------------------------------------------------------
+# share_folder() — outer attempt loop
+# ---------------------------------------------------------------------------
+
+
+class TestShareFolderAttempts(unittest.TestCase):
+    URL = "https://tenant.sharepoint.com/:f:/g/abc"
+
+    def _run(self, click_results, verify_results):
+        from unittest import mock
+        from onedrive_rpa.rpa import sharer as sharer_mod
+
+        page = mock.Mock()
+        with mock.patch.object(sharer_mod, "navigate_to_folder") as nav, \
+             mock.patch.object(sharer_mod, "_open_share_dialog") as open_dlg, \
+             mock.patch.object(sharer_mod, "_apply_share_settings") as apply_settings, \
+             mock.patch.object(sharer_mod, "_click_apply", side_effect=click_results) as click, \
+             mock.patch.object(
+                 sharer_mod, "_verify_link_requires_password", side_effect=verify_results
+             ) as verify, \
+             mock.patch.object(sharer_mod, "_close_share_dialog") as close_dlg:
+            stats = sharer_mod.share_folder(
+                page, "Camion/ADMIN/Bz13ff", "pw-123456789012345", datetime(2026, 10, 14)
+            )
+        return stats, SimpleNamespace(
+            nav=nav, open=open_dlg, apply=apply_settings, click=click,
+            verify=verify, close=close_dlg,
+        )
+
+    def test_verified_link_is_shared_first_try(self):
+        stats, calls = self._run([self.URL], [True])
+        self.assertEqual(stats.shared, ["Bz13ff"])
+        self.assertEqual(stats.share_urls, {"Bz13ff": self.URL})
+        self.assertEqual(stats.share_errors, [])
+        self.assertEqual(calls.click.call_count, 1)
+
+    def test_unverified_link_is_still_shared(self):
+        stats, _ = self._run([self.URL], [None])
+        self.assertEqual(stats.shared, ["Bz13ff"])
+        self.assertEqual(stats.share_errors, [])
+
+    def test_url_not_captured_retries_whole_flow(self):
+        from onedrive_rpa.config import SHARE_MAX_ATTEMPTS
+
+        stats, calls = self._run([None, self.URL], [True])
+        self.assertGreaterEqual(SHARE_MAX_ATTEMPTS, 2)
+        self.assertEqual(stats.shared, ["Bz13ff"])
+        self.assertEqual(calls.nav.call_count, 2)
+        self.assertEqual(calls.open.call_count, 2)
+        self.assertEqual(calls.apply.call_count, 2)
+        self.assertGreaterEqual(calls.close.call_count, 1)
+
+    def test_link_without_password_retries_whole_flow(self):
+        stats, calls = self._run([self.URL, self.URL], [False, True])
+        self.assertEqual(stats.shared, ["Bz13ff"])
+        self.assertEqual(calls.click.call_count, 2)
+
+    def test_url_never_captured_is_share_error(self):
+        from onedrive_rpa.config import SHARE_MAX_ATTEMPTS
+
+        stats, calls = self._run([None] * SHARE_MAX_ATTEMPTS, [])
+        self.assertEqual(stats.shared, [])
+        self.assertEqual(stats.share_errors, ["Bz13ff"])
+        self.assertEqual(stats.share_urls, {})
+        self.assertEqual(calls.click.call_count, SHARE_MAX_ATTEMPTS)
+
+    def test_link_never_protected_is_share_error(self):
+        from onedrive_rpa.config import SHARE_MAX_ATTEMPTS
+
+        stats, _ = self._run(
+            [self.URL] * SHARE_MAX_ATTEMPTS, [False] * SHARE_MAX_ATTEMPTS
+        )
+        self.assertEqual(stats.shared, [])
+        self.assertEqual(stats.share_errors, ["Bz13ff"])
+        self.assertEqual(stats.share_urls, {})
+
+
+    def test_verification_result_is_recorded(self):
+        stats, _ = self._run([self.URL], [None])
+        self.assertEqual(stats.share_verified, {"Bz13ff": None})
+        stats, _ = self._run([self.URL], [True])
+        self.assertEqual(stats.share_verified, {"Bz13ff": True})
+
+
+# ---------------------------------------------------------------------------
+# Pre-report gate (verify_shared_links)
+# ---------------------------------------------------------------------------
+
+
+class TestVerifySharedLinksGate(unittest.TestCase):
+    def _stats(self, shared, urls, verified):
+        from onedrive_rpa.rpa.sharer import ShareStats
+        return ShareStats(shared=list(shared), share_urls=dict(urls), share_verified=dict(verified))
+
+    def test_already_verified_is_not_revisited(self):
+        from onedrive_rpa.rpa.sharer import verify_shared_links
+
+        calls = []
+        stats = self._stats(["a"], {"a": "https://x/:f:/a"}, {"a": True})
+        result = verify_shared_links(object(), stats, verify=lambda p, u: calls.append(u))
+        self.assertEqual(result.verified, ["a"])
+        self.assertEqual(result.failed, [])
+        self.assertEqual(result.unverified, [])
+        self.assertEqual(calls, [])
+
+    def test_unverified_is_retried_once_and_can_pass(self):
+        from onedrive_rpa.rpa.sharer import verify_shared_links
+
+        calls = []
+
+        def verify(page, url):
+            calls.append(url)
+            return True
+
+        stats = self._stats(["a"], {"a": "https://x/:f:/a"}, {"a": None})
+        result = verify_shared_links(object(), stats, verify=verify)
+        self.assertEqual(result.verified, ["a"])
+        self.assertEqual(len(calls), 1)
+
+    def test_still_unverified_after_retry_is_not_validated(self):
+        from onedrive_rpa.rpa.sharer import verify_shared_links
+
+        calls = []
+
+        def verify(page, url):
+            calls.append(url)
+            return None
+
+        stats = self._stats(["a"], {"a": "https://x/:f:/a"}, {"a": None})
+        result = verify_shared_links(object(), stats, verify=verify)
+        self.assertEqual(result.verified, [])
+        self.assertEqual(result.unverified, ["a"])
+        self.assertEqual(len(calls), 1)
+
+    def test_retry_proving_no_password_is_failed(self):
+        from onedrive_rpa.rpa.sharer import verify_shared_links
+
+        stats = self._stats(["a"], {"a": "https://x/:f:/a"}, {"a": None})
+        result = verify_shared_links(object(), stats, verify=lambda p, u: False)
+        self.assertEqual(result.failed, ["a"])
+
+    def test_missing_url_or_false_is_failed_without_visit(self):
+        from onedrive_rpa.rpa.sharer import verify_shared_links
+
+        calls = []
+        stats = self._stats(
+            ["no_url", "bad"], {"bad": "https://x/:f:/b"}, {"bad": False, "no_url": True}
+        )
+        result = verify_shared_links(object(), stats, verify=lambda p, u: calls.append(u))
+        self.assertEqual(sorted(result.failed), ["bad", "no_url"])
+        self.assertEqual(calls, [])
+
+    def test_report_statuses_mapping(self):
+        from onedrive_rpa.rpa.sharer import ShareVerifyResult
+
+        result = ShareVerifyResult(verified=["a"], failed=["b"], unverified=["c"])
+        self.assertEqual(
+            result.report_statuses(),
+            {"a": "Shared", "b": "Failed", "c": "Unverified"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

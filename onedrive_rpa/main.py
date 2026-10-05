@@ -51,7 +51,7 @@ from onedrive_rpa.auth.session import (
 from onedrive_rpa.rpa.cleaner import FolderCleaner, CleanStats, FolderNotFoundError
 from onedrive_rpa.rpa.logger import configure_logging
 from onedrive_rpa.rpa.reporter import generate_password
-from onedrive_rpa.rpa.sharer import share_folder, ShareStats, folder_key
+from onedrive_rpa.rpa.sharer import share_folder, ShareStats, folder_key, verify_shared_links
 from onedrive_rpa.rpa._dates import adjust_expiry_for_holidays
 from onedrive_rpa.rpa.ui import RPADisplay
 
@@ -248,6 +248,7 @@ def main(
                         global_share_stats.shared.extend(share_result.shared)
                         global_share_stats.share_errors.extend(share_result.share_errors)
                         global_share_stats.share_urls.update(share_result.share_urls)
+                        global_share_stats.share_verified.update(share_result.share_verified)
                         # Emit share result to TUI activity log
                         expiry_str = share_expiry.strftime("%d/%m/%Y")
                         if share_result.shared:
@@ -290,7 +291,11 @@ def main(
                 share_statuses = {
                     folder_key(path): "Not shared" for path in folder_paths
                 }
-                share_statuses.update({key: "Shared" for key in global_share_stats.shared})
+                # Gate: a "Shared" row is usable only if its captured link was
+                # proven to ask an anonymous visitor for a password. Unproven
+                # links are retried once here; still unproven → "Unverified".
+                share_gate = verify_shared_links(page, global_share_stats)
+                share_statuses.update(share_gate.report_statuses())
                 share_statuses.update({key: "Failed" for key in global_share_stats.share_errors})
                 share_statuses.update({key: "Skipped" for key in global_share_stats.share_skipped})
                 run_report(

@@ -29,6 +29,12 @@ from onedrive_rpa.config import (
     LIST_SCROLL_SETTLE_MS,
     LIST_SCROLL_STABLE_READS,
     LIST_SCROLL_BUDGET_MS,
+    LOGIN_REDIRECT_HOSTS,
+    SHARE_MAX_ATTEMPTS,
+    SHARE_VERIFY_NAV_TIMEOUT_MS,
+    SHARE_VERIFY_TIMEOUT_MS,
+    SHARE_VERIFY_SETTLE_MS,
+    SHARE_VERIFY_SELECTORS,
 )
 from onedrive_rpa.rpa._retry import with_retry
 from onedrive_rpa.rpa._navigation import navigate_to_folder, names_match
@@ -58,6 +64,32 @@ class ShareStats:
 
     share_urls: dict = field(default_factory=dict)
     """Mapping of folder base_name -> OneDrive sharing URL captured from 'Copiar vínculo'."""
+
+    share_verified: dict = field(default_factory=dict)
+    """Mapping of folder base_name -> result of _verify_link_requires_password()
+    for the link recorded in ``share_urls`` (True / None; False never lands here
+    because share_folder treats it as a failed attempt)."""
+
+
+@dataclass
+class ShareVerifyResult:
+    """Outcome of the pre-report gate (verify_shared_links)."""
+
+    verified: list[str] = field(default_factory=list)
+    """Shared folders whose captured link was proven to ask for a password."""
+
+    failed: list[str] = field(default_factory=list)
+    """Shared folders with no captured URL, or whose link opens without a password."""
+
+    unverified: list[str] = field(default_factory=list)
+    """Shared folders whose link could not be checked even after one retry."""
+
+    def report_statuses(self) -> dict[str, str]:
+        """Map each gated folder to the report status it must carry."""
+        statuses = {key: "Shared" for key in self.verified}
+        statuses.update({key: "Failed" for key in self.failed})
+        statuses.update({key: "Unverified" for key in self.unverified})
+        return statuses
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +645,49 @@ def _set_expiry_date(page: "Page", frame: "Frame", expiry_date: datetime) -> Non
     )
 
 
+def _ensure_password_value(frame: "Frame", password: str) -> None:  # type: ignore[name-defined]
+    """Make sure the link-settings password input really holds *password*.
+
+    ``.fill()`` alone was never read back, and the optional "use new
+    settings" click (or any panel re-render) can leave the field empty — the
+    link is then applied WITHOUT a password while the report still lists one.
+    This reads the live value back; on mismatch it re-types the password
+    (click, clear, type key by key) and checks once more.
+
+    Never logs or embeds the password (or what was read back) in messages.
+
+    Raises:
+        ShareError: If the input cannot be found or still mismatches after
+            the re-type.
+    """
+    pwd_input = frame.locator(SHARE_SELECTORS["password_input"]).first
+
+    def _read() -> "str | None":
+        try:
+            return pwd_input.input_value(timeout=2_000)
+        except Exception:
+            return None
+
+    try:
+        pwd_input.wait_for(state="visible", timeout=ACTION_TIMEOUT_MS)
+    except Exception as exc:
+        raise ShareError(f"Password field not visible for read-back: {exc}") from exc
+
+    if _read() == password:
+        return
+
+    logger.warning("SHARE | password_readback_mismatch — re-typing password field")
+    try:
+        pwd_input.click(timeout=ACTION_TIMEOUT_MS)
+        pwd_input.fill("", timeout=ACTION_TIMEOUT_MS)
+        pwd_input.press_sequentially(password, delay=20, timeout=ACTION_TIMEOUT_MS)
+    except Exception as exc:
+        raise ShareError(f"Could not re-type password field: {exc}") from exc
+
+    if _read() != password:
+        raise ShareError("Password field does not hold the expected password after re-typing")
+
+
 @with_retry()
 def _apply_share_settings(page: "Page", password: str, expiry_date: datetime) -> None:  # type: ignore[name-defined]
     """Configure the share settings panel (inside shareFrame iframe).
@@ -667,8 +742,12 @@ def _apply_share_settings(page: "Page", password: str, expiry_date: datetime) ->
     except Exception:
         pass  # dialog didn't appear — normal for first-time shares
 
+    # Read the password back AFTER the optional click above: that click can
+    # re-render the panel and clear the field.
+    _ensure_password_value(frame, password)
 
-def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
+
+def _click_apply(page: "Page", password: "str | None" = None) -> "str | None":  # type: ignore[name-defined]
     """Click Apply, capture the sharing URL from 'Copiar vínculo', then close the dialog.
 
     After clicking Apply, OneDrive returns to the invite panel (the shareFrame iframe
@@ -679,14 +758,20 @@ def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
 
     Args:
         page: Authenticated Playwright page.
+        password: When given, the panel's password field is read back (and
+            re-typed if needed) immediately before clicking Apply.
 
     Returns:
         The OneDrive sharing URL (the one from "Copiar vínculo"), or None if capture fails.
 
     Raises:
-        ShareError: If the Apply button cannot be clicked.
+        ShareError: If the Apply button cannot be clicked, or the password
+            field no longer holds *password* right before Apply.
     """
     frame = _get_share_frame(page)
+
+    if password is not None:
+        _ensure_password_value(frame, password)
 
     try:
         frame.click(SHARE_SELECTORS["apply_button"], timeout=ACTION_TIMEOUT_MS)
@@ -782,9 +867,9 @@ def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
         if share_url:
             logger.debug("SHARE | URL captured from invite panel after Apply")
         else:
-            logger.debug("SHARE | URL capture failed — reporter will use fallback URL")
+            logger.debug("SHARE | URL capture failed")
     except Exception:
-        logger.debug("SHARE | copy-link URL capture failed — reporter will use fallback URL")
+        logger.debug("SHARE | copy-link URL capture failed")
 
     # Close the dialog by pressing Escape.
     try:
@@ -796,6 +881,87 @@ def _click_apply(page: "Page") -> "str | None":  # type: ignore[name-defined]
         logger.debug("SHARE | share iframe still present after apply — proceeding anyway")
 
     return share_url
+
+
+def _close_share_dialog(page: "Page") -> None:  # type: ignore[name-defined]
+    """Best-effort close of a share dialog left open by a failed attempt."""
+    try:
+        if page.locator(SHARE_SELECTORS["share_iframe"]).count() == 0:
+            return
+        page.keyboard.press("Escape")
+        page.wait_for_selector(
+            SHARE_SELECTORS["share_iframe"], state="detached", timeout=ACTION_TIMEOUT_MS
+        )
+    except Exception:
+        logger.debug("SHARE | share dialog still present before retry — proceeding anyway")
+
+
+def _verify_link_requires_password(page: "Page", url: str) -> "bool | None":  # type: ignore[name-defined]
+    """Open *url* as an anonymous visitor and check that it asks for a password.
+
+    Uses a brand-new context from the same browser with NO storage_state, so
+    the tenant session cookies cannot bypass the password gate.
+
+    Returns:
+        ``True``  — a password prompt became visible.
+        ``False`` — folder content became visible and no password prompt did:
+                    the link is open to anyone without a password.
+        ``None``  — could not tell (no browser handle, login redirect for
+                    anonymous visitors, neither signal within the timeout, or
+                    any unexpected error). Never treated as a failure.
+
+    Never logs the URL.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    try:
+        browser = page.context.browser
+    except Exception:
+        browser = None
+    if browser is None:
+        logger.debug("SHARE | verification skipped — no browser handle for anonymous context")
+        return None
+
+    pwd_sel = SHARE_VERIFY_SELECTORS["password_prompt"]
+    content_sel = SHARE_VERIFY_SELECTORS["folder_content"]
+    context = None
+    try:
+        context = browser.new_context()
+        anon = context.new_page()
+        anon.goto(url, timeout=SHARE_VERIFY_NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+
+        try:
+            anon.wait_for_selector(
+                f"{pwd_sel}, {content_sel}", state="visible", timeout=SHARE_VERIFY_TIMEOUT_MS
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("SHARE | verification inconclusive — no prompt nor content in time")
+            return None
+
+        current_url = (anon.url or "").lower()
+        if any(host in current_url for host in LOGIN_REDIRECT_HOSTS):
+            logger.debug("SHARE | verification inconclusive — anonymous visitor sent to sign-in")
+            return None
+
+        if anon.locator(pwd_sel).first.is_visible():
+            return True
+
+        # Content rendered first — give a late password gate a chance to show.
+        anon.wait_for_timeout(SHARE_VERIFY_SETTLE_MS)
+        if anon.locator(pwd_sel).first.is_visible():
+            return True
+        if anon.locator(content_sel).first.is_visible():
+            return False
+        return None
+    except Exception as exc:
+        logger.debug("SHARE | verification error: {e}", e=type(exc).__name__)
+        return None
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -814,12 +980,21 @@ def share_folder(
     This function is NON-FATAL: all exceptions are caught, logged at ERROR
     level, and recorded in ``ShareStats.share_errors``.  It never re-raises.
 
-    Flow:
+    Flow (whole flow repeated up to ``SHARE_MAX_ATTEMPTS`` times):
         1. Navigate to the parent folder.
         2. Find the folder row by base name and click its checkbox.
         3. Open the share dialog (with retry).
-        4. Configure: Anyone link, expiry date, password (with retry).
-        5. Click Apply and wait for the dialog to close.
+        4. Configure: Anyone link, expiry date, password (with retry) and
+           read the password back.
+        5. Re-check the password, click Apply, capture the link, close the dialog.
+        6. Open the link anonymously and check it asks for a password.
+
+    An attempt fails when the URL is not captured or step 6 proves the link
+    opens without a password; after the last attempt the folder lands in
+    ``share_errors`` (``url_not_captured`` / ``link_without_password``). An
+    inconclusive step 6 (None) still counts as shared, with SHARE_UNVERIFIED.
+    Exceptions are not retried at this level (inner steps have their own
+    retries) — they record the folder in ``share_errors`` right away.
 
     Args:
         page: Authenticated Playwright page.
@@ -835,36 +1010,75 @@ def share_folder(
     key = folder_key(folder_path)
     expiry_str = _format_expiry(expiry_date)
 
+    # Derive parent path and leaf name for navigation + row lookup
+    parts = folder_path.rstrip("/").rsplit("/", 1)
+    if len(parts) == 2:
+        parent_path, leaf_name = parts[0], parts[1]
+    else:
+        parent_path, leaf_name = "", parts[0]
+
+    failure_reason = "unknown"
     try:
-        # Derive parent path and leaf name for navigation + row lookup
-        parts = folder_path.rstrip("/").rsplit("/", 1)
-        if len(parts) == 2:
-            parent_path, leaf_name = parts[0], parts[1]
-        else:
-            parent_path, leaf_name = "", parts[0]
+        for attempt in range(1, SHARE_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                _close_share_dialog(page)
 
-        # Navigate to the parent folder so the target row is visible.
-        # parent_path="" navigates to root Documents — correct for top-level paths.
-        navigate_to_folder(page, parent_path)
+            # Navigate to the parent folder so the target row is visible.
+            # parent_path="" navigates to root Documents — correct for top-level paths.
+            navigate_to_folder(page, parent_path)
 
-        # Open share dialog (retried)
-        _open_share_dialog(page, leaf_name)
+            # Open share dialog (retried)
+            _open_share_dialog(page, leaf_name)
 
-        # Configure share settings (retried) — handles "¿Quieres actualizar?" dialog
-        _apply_share_settings(page, password, expiry_date)
+            # Configure share settings (retried) — handles "¿Quieres actualizar?" dialog
+            _apply_share_settings(page, password, expiry_date)
 
-        # Click Apply, capture URL from "Copiar vínculo" in the re-shown invite panel
-        # (after password and expiry are set), then close the dialog.
-        share_url = _click_apply(page)
-        if share_url:
+            # Re-verify the password, click Apply, capture URL from "Copiar
+            # vínculo" in the re-shown invite panel, then close the dialog.
+            share_url = _click_apply(page, password)
+            if not share_url:
+                failure_reason = "url_not_captured"
+                logger.warning(
+                    "SHARE_RETRY | folder={folder} | attempt={a}/{n} | reason={r}",
+                    folder=key, a=attempt, n=SHARE_MAX_ATTEMPTS, r=failure_reason,
+                )
+                continue
+
+            verified = _verify_link_requires_password(page, share_url)
+            if verified is False:
+                failure_reason = "link_without_password"
+                logger.warning(
+                    "SHARE_RETRY | folder={folder} | attempt={a}/{n} | reason={r}",
+                    folder=key, a=attempt, n=SHARE_MAX_ATTEMPTS, r=failure_reason,
+                )
+                continue
+
+            if verified is None:
+                logger.warning(
+                    "SHARE_UNVERIFIED | folder={folder} | could not confirm the link "
+                    "asks for a password",
+                    folder=key,
+                )
+
             stats.share_urls[key] = share_url
+            stats.share_verified[key] = verified
+            stats.shared.append(key)
+            logger.info(
+                "SHARE_OK | folder={folder} | expiry={expiry} | url_captured=True | "
+                "password_verified={verified} | attempt={a}",
+                folder=key,
+                expiry=expiry_str,
+                verified=verified,
+                a=attempt,
+            )
+            return stats
 
-        stats.shared.append(key)
-        logger.info(
-            "SHARE_OK | folder={folder} | expiry={expiry} | url_captured={captured}",
+        stats.share_errors.append(key)
+        logger.error(
+            "SHARE_ERROR | folder={folder} | reason={reason} | attempts={n}",
             folder=key,
-            expiry=expiry_str,
-            captured=bool(share_url),
+            reason=failure_reason,
+            n=SHARE_MAX_ATTEMPTS,
         )
 
     except ShareError as exc:
@@ -883,3 +1097,65 @@ def share_folder(
         )
 
     return stats
+
+
+def verify_shared_links(
+    page: "Page",  # type: ignore[name-defined]
+    share_stats: ShareStats,
+    *,
+    verify=None,
+) -> ShareVerifyResult:
+    """Pre-report gate: every "shared" folder must hold a captured link that
+    an anonymous visitor is asked a password for.
+
+    - No captured URL, or a recorded ``False``         → failed.
+    - Recorded ``True`` (checked during share_folder)  → verified, not revisited.
+    - Recorded ``None`` or no record                   → verified once more now;
+      ``True`` → verified, ``False`` → failed, ``None`` → unverified.
+
+    Unverified folders are NOT validated: the report must not list them as
+    usable. Logs ``SHARE_VERIFY_SUMMARY``; never logs URLs or passwords.
+
+    Args:
+        page: Authenticated page (only its browser is used, via a fresh
+            anonymous context).
+        share_stats: Accumulated run sharing stats.
+        verify: Injectable verifier (defaults to _verify_link_requires_password).
+
+    Returns:
+        ShareVerifyResult partitioning ``share_stats.shared``.
+    """
+    verify = verify or _verify_link_requires_password
+    result = ShareVerifyResult()
+
+    for key in share_stats.shared:
+        url = share_stats.share_urls.get(key)
+        if not url:
+            result.failed.append(key)
+            continue
+
+        status = share_stats.share_verified.get(key)
+        if status is None:
+            status = verify(page, url)
+            share_stats.share_verified[key] = status
+
+        if status is True:
+            result.verified.append(key)
+        elif status is False:
+            result.failed.append(key)
+        else:
+            result.unverified.append(key)
+            logger.warning(
+                "SHARE_UNVERIFIED | folder={folder} | gate retry still inconclusive — "
+                "excluded from report as usable link",
+                folder=key,
+            )
+
+    log = logger.info if not (result.failed or result.unverified) else logger.warning
+    log(
+        "SHARE_VERIFY_SUMMARY | verified={n} | failed={failed} | unverified={unverified}",
+        n=len(result.verified),
+        failed=result.failed,
+        unverified=result.unverified,
+    )
+    return result

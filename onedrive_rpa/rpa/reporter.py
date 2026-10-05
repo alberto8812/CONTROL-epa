@@ -264,8 +264,13 @@ def build_report_rows(
                     ``None`` or a folder has no entry, falls back to the
                      constructed URL (backward compatible, fail-open).
         share_statuses: Optional map of folder base name -> ``Shared``,
-                        ``Failed``, ``Skipped``, or ``Not shared``. Non-shared
-                        statuses deliberately produce blank URL and password fields.
+                        ``Failed``, ``Unverified``, ``Skipped``, or ``Not shared``.
+                        Non-shared statuses deliberately produce blank URL and
+                        password fields. When this map is given (the real share
+                        pipeline), a ``Shared`` folder missing its captured
+                        share URL or its password is downgraded to ``Failed``
+                        (blank fields) — the constructed-URL and generated-
+                        password fallbacks above apply only when it is ``None``.
         full_paths: Optional list of full folder paths parallel to
                     ``folder_names`` (e.g. ``["Camion/Plano/Bz8yy", ...]``).
                     When provided, the fallback URL is built from the full path
@@ -280,6 +285,25 @@ def build_report_rows(
     rows = []
     for i, name in enumerate(folder_names):
         share_status = share_statuses.get(name, "Not shared") if share_statuses is not None else "Shared"
+        if share_status == "Shared" and share_statuses is not None:
+            # Real share pipeline: a "Shared" row is only usable when BOTH the
+            # captured share link and the password actually set on it exist.
+            # Never substitute the constructed folder URL (not a share link —
+            # it requires sign-in) nor a freshly generated password (never set
+            # on any link). Downgrade to the existing blank "Failed" row instead.
+            missing = [
+                label for label, present in (
+                    ("share_url", bool(share_urls and share_urls.get(name))),
+                    ("password", bool(passwords and passwords.get(name))),
+                ) if not present
+            ]
+            if missing:
+                logger.warning(
+                    "REPORT_ROW_UNUSABLE | folder={f} | missing={m} | status=Failed",
+                    f=name,
+                    m=",".join(missing),
+                )
+                share_status = "Failed"
         if share_status == "Shared":
             # Use the real OneDrive sharing URL when available (captured from
             # "Copiar vínculo" after sharing); fall back to the constructed path URL.
