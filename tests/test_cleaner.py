@@ -229,10 +229,11 @@ class TestProcessItemsVerifyLoop(unittest.TestCase):
         self.assertEqual(stats.deleted, [])
         self.assertEqual(stats.incomplete, [])
 
-    def test_exception_mid_loop_breaks_and_records_error_once_per_pending_file(self):
+    def test_exception_mid_loop_breaks_when_recovery_fails(self):
         """
-        A hard exception during a verify pass must stop the loop (not keep
-        hammering delete) and land in stats.errors/stats.incomplete.
+        A hard exception during a verify pass whose RECOVERY (re-navigation)
+        also fails must stop the loop (not keep hammering delete) and land in
+        stats.errors/stats.incomplete — same outcome as before recovery existed.
         """
         from onedrive_rpa.rpa import cleaner as cleaner_mod
 
@@ -243,13 +244,148 @@ class TestProcessItemsVerifyLoop(unittest.TestCase):
         with mock.patch.object(cleaner_mod, "list_items", side_effect=[items, items]), \
              mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
              mock.patch.object(
+                 cleaner_mod, "navigate_to_folder", side_effect=RuntimeError("nav down")
+             ), \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot") as shot, \
+             mock.patch.object(
                  cleaner_mod, "_bulk_delete_files", side_effect=RuntimeError("boom")
-             ):
+             ) as bulk:
             cleaner._process_items("Broken/Folder", stats)
 
+        self.assertEqual(bulk.call_count, 1)
+        shot.assert_called_once()
         self.assertEqual(stats.incomplete, ["Broken/Folder"])
         self.assertEqual(len(stats.errors), 3)
         self.assertEqual(stats.deleted, [])
+
+    def test_exception_is_recovered_and_next_pass_empties_folder(self):
+        """
+        Regression for Camion/ADMIN/Bz13ff (3 weekly runs INCOMPLETE): a
+        timeout waiting for the select-all header used to abort the loop.
+        Now the folder is re-navigated, re-listed, and the next pass finishes.
+        """
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+
+        items = self._make_items(40)
+        listings = [
+            items,                     # top-level scan
+            items,                     # current_items
+            self._make_items(25),      # recovery re-listing after pass 1 blew up
+            [],                        # re-listing after pass 2 -> empty
+        ]
+        cleaner, page = self._make_cleaner()
+        stats = cleaner_mod.CleanStats()
+
+        with mock.patch.object(cleaner_mod, "list_items", side_effect=listings), \
+             mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
+             mock.patch.object(cleaner_mod, "navigate_to_folder") as nav, \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot"), \
+             mock.patch.object(
+                 cleaner_mod,
+                 "_bulk_delete_files",
+                 side_effect=[RuntimeError("Timeout 10000ms row-selection-header"), None],
+             ) as bulk:
+            result = cleaner._process_items("Camion/ADMIN/Bz13ff", stats)
+
+        nav.assert_called_once_with(page, "Camion/ADMIN/Bz13ff")
+        self.assertEqual(bulk.call_count, 2)
+        self.assertEqual(len(stats.deleted), 40)
+        self.assertEqual(len(set(stats.deleted)), 40)
+        self.assertEqual(stats.incomplete, [])
+        self.assertEqual(stats.errors, [])
+        self.assertTrue(result)
+
+    def test_recovery_listing_that_is_empty_completes_without_another_pass(self):
+        """If the failed pass actually deleted everything, recovery confirms it."""
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+
+        items = self._make_items(5)
+        cleaner, page = self._make_cleaner()
+        stats = cleaner_mod.CleanStats()
+
+        with mock.patch.object(cleaner_mod, "list_items", side_effect=[items, items, []]), \
+             mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
+             mock.patch.object(cleaner_mod, "navigate_to_folder"), \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot"), \
+             mock.patch.object(
+                 cleaner_mod, "_bulk_delete_files", side_effect=RuntimeError("boom")
+             ) as bulk:
+            cleaner._process_items("Some/Folder", stats)
+
+        self.assertEqual(bulk.call_count, 1)
+        self.assertEqual(len(stats.deleted), 5)
+        self.assertEqual(stats.incomplete, [])
+        self.assertEqual(stats.errors, [])
+
+    def test_every_pass_failing_ends_incomplete_with_folder_error(self):
+        """Recovery works but every pass blows up: passes exhaust -> INCOMPLETE."""
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+        from onedrive_rpa.config import MAX_EMPTY_VERIFY_PASSES
+
+        items = self._make_items(3)
+        listings = [items] * (2 + MAX_EMPTY_VERIFY_PASSES)
+        cleaner, page = self._make_cleaner()
+        stats = cleaner_mod.CleanStats()
+
+        with mock.patch.object(cleaner_mod, "list_items", side_effect=listings), \
+             mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
+             mock.patch.object(cleaner_mod, "navigate_to_folder"), \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot"), \
+             mock.patch.object(
+                 cleaner_mod, "_bulk_delete_files", side_effect=RuntimeError("boom")
+             ) as bulk:
+            cleaner._process_items("Stuck/Folder", stats)
+
+        self.assertEqual(bulk.call_count, MAX_EMPTY_VERIFY_PASSES)
+        self.assertEqual(stats.incomplete, ["Stuck/Folder"])
+        self.assertIn("Stuck/Folder", stats.errors)
+        self.assertEqual(stats.deleted, [])
+
+    def test_session_expiry_during_recovery_propagates(self):
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+        from onedrive_rpa.auth.session import SessionExpiredError
+
+        items = self._make_items(2)
+        cleaner, page = self._make_cleaner()
+        stats = cleaner_mod.CleanStats()
+
+        with mock.patch.object(cleaner_mod, "list_items", side_effect=[items, items]), \
+             mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
+             mock.patch.object(
+                 cleaner_mod, "navigate_to_folder", side_effect=SessionExpiredError("x")
+             ), \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot"), \
+             mock.patch.object(
+                 cleaner_mod, "_bulk_delete_files", side_effect=RuntimeError("boom")
+             ):
+            with self.assertRaises(SessionExpiredError):
+                cleaner._process_items("Some/Folder", stats)
+
+
+class TestSaveFailureScreenshot(unittest.TestCase):
+    def test_screenshot_failure_never_raises(self):
+        from onedrive_rpa.rpa.cleaner import _save_failure_screenshot
+
+        page = mock.Mock()
+        page.screenshot.side_effect = RuntimeError("browser gone")
+        self.assertIsNone(_save_failure_screenshot(page, "Camion/ADMIN/Bz13ff", 3))
+
+    def test_screenshot_path_is_sanitized_and_in_logs(self):
+        import tempfile
+        from pathlib import Path
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+
+        page = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(cleaner_mod, "LOG_DIR", Path(tmp)):
+            path = cleaner_mod._save_failure_screenshot(page, "Camion/ADMIN/Bz 13ff", 3)
+
+        self.assertIsNotNone(path)
+        self.assertEqual(path.parent, Path(tmp))
+        self.assertNotIn("/", path.name)
+        self.assertNotIn(" ", path.name)
+        self.assertIn("Camion_ADMIN_Bz_13ff", path.name)
+        page.screenshot.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +445,46 @@ class TestEmptySubfolderDeletion(unittest.TestCase):
         delete_item.assert_called_once_with(page, "test")
         self.assertEqual(stats.deleted_folders, ["Bz13ff/test"])
         self.assertEqual(len(stats.deleted), 3)
+        self.assertTrue(result)
+
+    def test_after_recovery_in_child_parent_is_reached_by_url_not_history(self):
+        """
+        Recovery re-navigates with page.goto(), which pushes a history entry:
+        a later browser Back would land on the child again, not the parent.
+        So once a recovery happened, returning to the parent must navigate
+        by URL instead of _go_back().
+        """
+        from onedrive_rpa.rpa import cleaner as cleaner_mod
+
+        files = self._make_items(3)
+        listings = [
+            [self._folder_item("test")],  # root scan
+            files,                         # child scan
+            files,                         # child current_files
+            [],                            # recovery re-listing -> already empty
+            [],                            # root current_files
+        ]
+        cleaner, page = self._make_cleaner()
+        stats = cleaner_mod.CleanStats()
+
+        with mock.patch.object(cleaner_mod, "list_items", side_effect=listings), \
+             mock.patch.object(
+                 cleaner_mod, "_bulk_delete_files", side_effect=RuntimeError("boom")
+             ), \
+             mock.patch.object(cleaner_mod, "check_session_expired", return_value=None), \
+             mock.patch.object(cleaner_mod, "_enter_folder", return_value=None), \
+             mock.patch.object(cleaner_mod, "_go_back", return_value=None) as go_back, \
+             mock.patch.object(cleaner_mod, "navigate_to_folder") as nav, \
+             mock.patch.object(cleaner_mod, "_save_failure_screenshot"), \
+             mock.patch.object(cleaner_mod, "_delete_single_row", return_value=None):
+            result = cleaner._process_items("Bz13ff", stats)
+
+        go_back.assert_not_called()
+        self.assertEqual(
+            nav.call_args_list,
+            [mock.call(page, "Bz13ff/test"), mock.call(page, "Bz13ff")],
+        )
+        self.assertEqual(stats.deleted_folders, ["Bz13ff/test"])
         self.assertTrue(result)
 
     def test_incomplete_subfolder_is_not_deleted(self):

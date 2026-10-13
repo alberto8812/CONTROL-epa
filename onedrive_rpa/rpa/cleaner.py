@@ -29,14 +29,26 @@ Por qué el loop de verificación NO viola ADR-7 (borrado no idempotente):
     ya resuelta. Si tras todos los intentos algo sigue pendiente, la carpeta
     se marca como `incomplete` en vez de reportarse como éxito silencioso.
 
+Recuperación ante excepción dentro del loop: una pasada que lanza (p. ej.
+timeout esperando el header de selección porque la página quedó colgada) ya
+no aborta las pasadas restantes. Se loggea, se toma un screenshot best-effort
+en logs/, se RE-NAVEGA a la carpeta y se re-lista; lo que desapareció cuenta
+como DELETED y la siguiente pasada continúa con lo que sigue pendiente. Solo
+si la recuperación misma falla se conserva el comportamiento anterior
+(errores por archivo + INCOMPLETE). Esto tampoco viola ADR-7: el delete no se
+reintenta, se vuelve a listar desde cero y la próxima pasada es fresca.
+
 Borrado NO se reintenta a nivel de operación individual (ADR-7).
 Navegación y listing SÍ (via with_retry).
 """
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
@@ -51,6 +63,7 @@ from onedrive_rpa.config import (
     EMPTY_VERIFY_MAX_SETTLE_MS,
     SELECTION_SETTLE_MS,
     COMMAND_PROBE_TIMEOUT_MS,
+    LOG_DIR,
 )
 from onedrive_rpa.auth.session import check_session_expired, SessionExpiredError
 from onedrive_rpa.rpa._retry import with_retry
@@ -142,6 +155,31 @@ def _diff_listing(
     return confirmed_deleted, still_pending, newly_appeared
 
 
+def _save_failure_screenshot(page: Page, folder_path: str, attempt: int) -> Path | None:
+    """
+    Guarda un screenshot best-effort del estado de la página tras un fallo en
+    el loop de borrado, en LOG_DIR, con timestamp + ruta saneada en el nombre.
+
+    Nunca lanza: un screenshot es evidencia de diagnóstico, no puede convertir
+    un fallo recuperable en uno fatal.
+
+    Returns:
+        La ruta del archivo escrito, o None si no se pudo tomar.
+    """
+    try:
+        safe_path = re.sub(r"[^A-Za-z0-9._-]+", "_", folder_path).strip("_")[:80]
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target_dir = Path(LOG_DIR)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"clean_error_{stamp}_{safe_path or 'root'}_attempt{attempt}.png"
+        page.screenshot(path=str(target), full_page=False, timeout=ACTION_TIMEOUT_MS)
+        logger.info("SCREENSHOT | path={p} | file={f}", p=folder_path, f=target.name)
+        return target
+    except Exception as exc:
+        logger.debug("SCREENSHOT | no se pudo guardar: {e}", e=str(exc))
+        return None
+
+
 def _wait_for_delete_settle(page: Page) -> None:
     """
     Wait for a bulk delete to finish propagating server-side before re-listing.
@@ -189,6 +227,11 @@ class FolderCleaner:
         self._page = page
         self._dry_run = dry_run
         self._cb = callbacks or RPACallbacks()
+        # True una vez que una recuperación re-navegó con page.goto(): desde
+        # ahí el historial del browser ya no refleja el árbol de carpetas
+        # (Back volvería a la carpeta recuperada, no al padre), así que el
+        # regreso al padre debe hacerse por URL hasta terminar este clean().
+        self._history_unreliable = False
 
     def clean(self, folder_path: str) -> CleanStats:
         """
@@ -215,6 +258,8 @@ class FolderCleaner:
 
         logger.info("BEGIN CLEAN | folder={folder}", folder=folder_path)
         self._cb.on_folder_start(folder_path)
+
+        self._history_unreliable = False
 
         try:
             navigate_to_folder(self._page, folder_path)
@@ -257,7 +302,7 @@ class FolderCleaner:
             try:
                 _enter_folder(self._page, item.name)
                 child_is_empty = self._process_items(child_path, stats)
-                _go_back(self._page, current_path)
+                self._return_to_parent(current_path)
 
                 if child_is_empty:
                     self._remove_empty_folder(item.name, child_path, stats)
@@ -352,12 +397,37 @@ class FolderCleaner:
                     attempt=attempt,
                     reason=str(exc),
                 )
-                hard_failure = True
-                for name in pending:
-                    item_path = f"{current_path}/{name}"
-                    stats.errors.append(item_path)
-                    self._cb.on_error(item_path, str(exc))
-                break
+                _save_failure_screenshot(self._page, current_path, attempt)
+
+                # Recuperar: la página suele quedar colgada (header de
+                # selección desaparecido); re-navegar y re-listar deja un
+                # estado limpio para la próxima pasada en vez de abortar.
+                try:
+                    pending = self._recover_listing(current_path, pending, stats)
+                except SessionExpiredError:
+                    raise
+                except Exception as rec_exc:
+                    logger.error(
+                        "RECOVERY_FAILED | path={path} attempt={attempt} reason={reason}",
+                        path=current_path,
+                        attempt=attempt,
+                        reason=str(rec_exc),
+                    )
+                    hard_failure = True
+                    for name in pending:
+                        item_path = f"{current_path}/{name}"
+                        stats.errors.append(item_path)
+                        self._cb.on_error(item_path, str(exc))
+                    break
+
+                logger.warning(
+                    "RECOVERED | path={path} attempt={attempt} pending={n}",
+                    path=current_path,
+                    attempt=attempt,
+                    n=len(pending),
+                )
+                if not pending:
+                    break
 
         if pending:
             stats.incomplete.append(current_path)
@@ -373,6 +443,64 @@ class FolderCleaner:
             return False
 
         return subfolders_all_removed
+
+    def _recover_listing(
+        self, current_path: str, pending: set[str], stats: CleanStats
+    ) -> set[str]:
+        """
+        Re-navega a current_path, re-lista y recalcula lo pendiente tras una
+        pasada que lanzó excepción.
+
+        Lo que estaba pendiente y ya no aparece se reporta como DELETED (la
+        pasada fallida pudo haber borrado antes de colgarse). Lo que aparece
+        y no estaba pendiente es una subida concurrente: se avisa pero no se
+        agrega, igual que en una pasada normal (ver _diff_listing).
+
+        Returns:
+            El nuevo conjunto pendiente (solo archivos).
+
+        Raises:
+            SessionExpiredError: si la sesión expiró.
+            Exception: cualquier fallo de navegación/listado — el llamador
+                lo trata como recuperación fallida.
+        """
+        navigate_to_folder(self._page, current_path)
+        self._history_unreliable = True
+        check_session_expired(self._page)
+
+        fresh_items = list_items(self._page)
+        remaining = {i.name for i in fresh_items if not i.is_folder}
+        confirmed_deleted, still_pending, newly_appeared = _diff_listing(
+            pending, remaining
+        )
+
+        for name in confirmed_deleted:
+            item_path = f"{current_path}/{name}"
+            logger.info("DELETED | {path}", path=item_path)
+            stats.deleted.append(item_path)
+            self._cb.on_file_deleted(item_path)
+
+        if newly_appeared:
+            logger.warning(
+                "CONCURRENT_UPLOAD | path={path} | items={items}",
+                path=current_path,
+                items=newly_appeared,
+            )
+
+        return still_pending
+
+    def _return_to_parent(self, parent_path: str) -> None:
+        """
+        Vuelve a la carpeta padre tras procesar una subcarpeta.
+
+        Normalmente con Back del browser; si una recuperación re-navegó por
+        URL durante este clean(), el historial ya no es confiable y se
+        navega directo al padre.
+        """
+        if self._history_unreliable:
+            navigate_to_folder(self._page, parent_path)
+        else:
+            _go_back(self._page, parent_path)
 
     def _remove_empty_folder(
         self, folder_name: str, folder_path: str, stats: CleanStats

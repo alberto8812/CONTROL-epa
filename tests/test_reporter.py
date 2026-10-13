@@ -542,6 +542,7 @@ class TestBuildReportRowsShareStatus(unittest.TestCase):
         rows = build_report_rows(
             ["failed", "skipped", "shared"],
             passwords={"failed": "bad", "skipped": "omit", "shared": "good"},
+            share_urls={"shared": "https://tenant.sharepoint.com/:f:/g/shared"},
             share_statuses={"failed": "Failed", "skipped": "Skipped", "shared": "Shared"},
             fernet=Fernet(Fernet.generate_key()),
         )
@@ -554,6 +555,68 @@ class TestBuildReportRowsShareStatus(unittest.TestCase):
         self.assertEqual(rows[1]["encrypted_url"], "")
         self.assertEqual(rows[2]["password"], "good")
         self.assertTrue(rows[2]["short_url"])
+
+
+    def _shared_row(self, **kwargs):
+        from unittest import mock
+        from onedrive_rpa.rpa import reporter as reporter_mod
+
+        with mock.patch.object(
+            reporter_mod, "generate_password", return_value="INVENTED"
+        ) as gen, mock.patch.object(reporter_mod, "_shorten_url", side_effect=lambda u: u):
+            rows = reporter_mod.build_report_rows(
+                ["Bz13ff"],
+                share_statuses={"Bz13ff": "Shared"},
+                full_paths=["Camion/ADMIN/Bz13ff"],
+                **kwargs,
+            )
+        return rows[0], gen
+
+    def test_shared_without_captured_url_is_not_usable(self):
+        """No captured share link -> no constructed folder URL masquerading as one."""
+        row, gen = self._shared_row(passwords={"Bz13ff": "real-pass"}, share_urls={})
+        self.assertEqual(row["share_status"], "Failed")
+        self.assertEqual(row["password"], "")
+        self.assertEqual(row["short_url"], "")
+        self.assertEqual(row["folder_url"], "")
+        self.assertEqual(row["encrypted_url"], "")
+        gen.assert_not_called()
+
+    def test_shared_without_password_never_invents_one(self):
+        """A password that was never set on the link must not be generated here."""
+        row, gen = self._shared_row(
+            passwords={}, share_urls={"Bz13ff": "https://t.sharepoint.com/:f:/g/x"}
+        )
+        self.assertEqual(row["share_status"], "Failed")
+        self.assertEqual(row["password"], "")
+        self.assertEqual(row["short_url"], "")
+        gen.assert_not_called()
+
+    def test_shared_with_url_and_password_is_kept(self):
+        url = "https://t.sharepoint.com/:f:/g/x"
+        row, gen = self._shared_row(
+            passwords={"Bz13ff": "real-pass"}, share_urls={"Bz13ff": url}
+        )
+        self.assertEqual(row["share_status"], "Shared")
+        self.assertEqual(row["password"], "real-pass")
+        self.assertEqual(row["folder_url"], url)
+        gen.assert_not_called()
+
+
+    def test_unverified_status_has_no_link_or_password(self):
+        """A link that could not be validated before the report is not usable."""
+        from onedrive_rpa.rpa.reporter import build_report_rows
+
+        rows = build_report_rows(
+            ["Bz13ff"],
+            passwords={"Bz13ff": "real-pass"},
+            share_urls={"Bz13ff": "https://t.sharepoint.com/:f:/g/x"},
+            share_statuses={"Bz13ff": "Unverified"},
+        )
+        self.assertEqual(rows[0]["share_status"], "Unverified")
+        self.assertEqual(rows[0]["password"], "")
+        self.assertEqual(rows[0]["short_url"], "")
+        self.assertEqual(rows[0]["folder_url"], "")
 
 
 if __name__ == "__main__":
