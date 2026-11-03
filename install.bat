@@ -39,7 +39,7 @@ exit /b 1
 :after_python_check
 
 REM 3. Check/install pipx
-where pipx >nul 2>&1
+python -m pipx --version >nul 2>&1
 if errorlevel 1 (
     echo   Instalando pipx...
     python -m pip install --user pipx --quiet
@@ -55,7 +55,7 @@ echo [OK] pipx listo
 REM 4. Install novahold
 set SCRIPT_DIR=%~dp0
 echo   Instalando novahold...
-pipx install "%SCRIPT_DIR:~0,-1%" --force --quiet
+python -m pipx install "%SCRIPT_DIR:~0,-1%" --force --quiet
 if errorlevel 1 (
     echo [ERROR] No se pudo instalar novahold.
     pause
